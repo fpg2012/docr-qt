@@ -60,9 +60,10 @@ private:
     void buildActions();
     void applySettings();
     void saveSettings();
-    void openSettings();
 
     void openFiles();
+    void openPreferences();
+    void showAbout();
     void openDirectory();
     void addPagesToUi();
     void showPage(int index);
@@ -83,6 +84,7 @@ private:
     void copyText();
     void copySelection();
     void showSelectionStatus();
+    QString saveEmptyDiagnostics(int page, const ocr::PageResult &result);
 
     void syncCardsFromView();
     void syncViewFromCards();
@@ -114,6 +116,7 @@ private:
 
     QQueue<int> m_pending;
     QSet<int> m_running;
+    QSet<int> m_emptyRetries;
     int m_generation = 0;
     int m_concurrency = 3;
     int m_dpi = 150;
@@ -122,6 +125,7 @@ private:
     QString m_purpose = QStringLiteral("rich_layout_recognition");
     bool m_allDoneEmitted = true;
     bool m_showBoxes = true;
+    bool m_batchMode = false;
     bool m_syncing = false;
     bool m_dropHint = false;
 };

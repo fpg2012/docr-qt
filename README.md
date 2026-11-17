@@ -2,7 +2,8 @@
 
 ![截图（深色）](docs/screenshot-dark.png)
 
-浅色方案见 `docs/screenshot-light.png`，拖入提示见 `docs/screenshot-drop.png`。
+浅色方案见 `docs/screenshot-light.png`，拖入提示见 `docs/screenshot-drop.png`，
+首选项与关于见 `docs/preferences.png`、`docs/about.png`。
 
 DeepSeek OCR 的 Qt 6 桌面前端：拖入 PDF 或图片序列，逐页调用
 `POST /v1/tools/ocr`，把返回的 `<|ref|>/<|box|>` 版面坐标叠加显示在页面上。
@@ -60,12 +61,27 @@ cmake --build build -j
 | 虚线框 | 显示/隐藏识别框 | — |
 | I 形光标 | 选中文本工具 | — |
 | 双向箭头 / ± 放大镜 / 角标 | 适应宽度 / 放大 / 缩小 / 原始大小 | `F` / `Ctrl++` / `Ctrl+-` / `Ctrl+0` |
-| 滑杆 | 设置 | `Ctrl+,` |
+| 滑杆 | 首选项 | `Ctrl+,` |
 
 图标为手写的 24×24 线性 SVG（`assets/icons/`），描边用 `currentColor`，运行时按
 `QPalette::WindowText` 染色，浅色/深色下都保持对比度；应用图标是深色圆角方块 + 扫描角标
 （`assets/app.svg`，带浅色描边以便在深色标题栏上可辨）。`cmake --install` 会把图标装到 `share/icons/hicolor/scalable/apps/docr-qt.svg`，
 并安装 `assets/docr-qt.desktop`。
+
+## 首选项与关于
+
+「编辑 → 首选项…」（`Ctrl+,`）分两页：
+
+- **API**：设置 Key、显示/隐藏、从 DSH 凭据库载入、是否保存到本机、接口地址；
+  留空时按环境变量、DSH 凭据库的顺序回退。
+- **识别**：默认 purpose、渲染 dpi、并发数。
+
+![首选项](docs/preferences.png)
+
+「帮助 → 关于 docr-qt」显示版本、Qt 版本、接口地址和当前识别模式；「关于 Qt」是 Qt 自带的
+版本信息。
+
+![关于](docs/about.png)
 
 ## 使用
 
@@ -113,7 +129,8 @@ cmake --build build -j
 
 - 选择 purpose 后点「识别全部」（`Ctrl+Shift+R`）或「识别本页」（`Ctrl+R`）；
   `Esc` 停止（已发出但未返回的请求会被丢弃）。
-- 左侧页列表带状态（⏳ 进行中 / ✓ 成功 / ✕ 失败）。
+- 点「识别本页」会立刻在页列表标 `⏳`、状态栏显示“正在识别第 N 页”，不会静默排队。
+- 左侧页列表带状态（⏳ 进行中 / ✓ 成功 / `!` 空结果 / ✕ 失败）。
 - 缩放：`Ctrl+滚轮`，`F` 适应宽度，`Ctrl+0` 原始大小。
 - 「文件 → 导出 Markdown / JSON」。
 
@@ -127,13 +144,32 @@ cmake --build build -j
 
 ## 配置
 
-设置对话框（`Ctrl+,`）可改 API Key、接口地址、渲染 dpi、并发数。
+首选项（`Ctrl+,`，见上文）可改 API Key、接口地址、默认 purpose、渲染 dpi、并发数。
 
 API Key 解析顺序：
 
 1. 设置里保存的 Key（勾选「保存到本机设置」时才落盘）
 2. `DEEPSEEK_API_KEY` 环境变量
 3. `~/.dsh/.credentials.yaml` 中的 `DEEPSEEK_API_KEY`（复用 DSH 凭据库，只读）
+
+## 识别异常与诊断
+
+服务端偶尔会在 HTTP 200 里返回**空结果**：`pages[0].text == ""`、`finish_reason == "stop"`，
+`usage` 只有输入 token（例如一页 356 个输入 token、0 个输出 token）。这不是“空白页”：
+实测空白页也会返回一个覆盖整页的 `image` 块和 15 个输出 token。因此客户端不应把它当成
+成功。
+
+现在的处理：
+
+1. 如果页面有墨迹但结果没有文字、没有版面块，自动重试一次；
+2. 页列表先显示 `↻`，重试成功则恢复正常 `✓`；
+3. 重试仍为空时标 `!`，状态栏给出说明；
+4. 同时把**原始响应、精确上传的页面 PNG、元数据**（页码、purpose、dpi、usage、
+   finish_reason、接口地址）保存到 `~/.cache/docr-qt/ocr-empty/`，状态栏会显示路径；
+5. 空白页（没有墨迹）不重试、不报警，只提示“没有文字（空白页）”。
+
+这些文件足以判断是服务端空生成、结果被截断，还是输入本身有问题；如果再次遇到，可以把
+对应目录里的 `.json` / `.png` 发出来分析。
 
 ## 设计说明
 
@@ -143,6 +179,8 @@ API Key 解析顺序：
   PDF + 图片可以按顺序拼成一个文档，而不是只支持单个 PDF。
 - **拖入事件用应用级过滤器兜底**：`QPlainTextEdit`、`QListWidget` 等子控件默认会接受拖放，
   在主窗口上装 `qApp` 事件过滤器，保证在任何子控件上松手都能打开文件。
+- **空结果不能算成功**：结果只校验 JSON 结构会让零输出被标成 `✓`，用户看到的就是“点了没反应”；
+  现在按“有墨迹 + 无文本/无块”判定并重试，仍失败则保留原始响应用于诊断。
 - **图片卡片裁剪**：用块坐标（0–1000 归一化）在整页渲染图上取并集矩形，按比例缩放到卡片里，
   不改动原图，也不额外请求。
 - 渲染默认 150 dpi（A4 ≈ 1240×1754）。dpi 越高小字越准，上传体积也越大。
@@ -157,11 +195,12 @@ API Key 解析顺序：
 ./build/docr-qt --open a.pdf --open b.png               # 多文件混排（--open 可重复）
 ./build/docr-qt --open page.png --mock out/rich_layout_recognition.json
 ./build/docr-qt --open page.png --mock out/rich_layout_recognition.json --select 0,1,2
+./build/docr-qt --open doc.pdf --page 5 --ocr-current --screenshot page5.png  # 只识别当前页
 ./build/docr-qt --open page.png --ocr --screenshot ui.png  # 识别完成后截图退出（CI/无头）
 ```
 
 `--select 0,1,2` 选中第 1 页的指定块（调试用，便于截图/回归），`--page N` 启动后跳到第 N 页，
-`--drop-hint` 强制显示拖入提示框。
+`--ocr-current` 只识别当前页，`--drop-hint` 强制显示拖入提示框。
 
 ## 已知限制
 

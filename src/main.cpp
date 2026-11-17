@@ -23,6 +23,8 @@ int main(int argc, char *argv[])
                                   QStringLiteral("启动时打开 PDF / 图片 / 目录（可重复）"),
                                   QStringLiteral("path"));
     QCommandLineOption ocrOption(QStringLiteral("ocr"), QStringLiteral("启动后立即识别全部页面"));
+    QCommandLineOption ocrCurrentOption(QStringLiteral("ocr-current"),
+                                        QStringLiteral("启动后识别当前页"));
     QCommandLineOption screenshotOption(QStringLiteral("screenshot"),
                                         QStringLiteral("识别完成后保存窗口截图并退出"),
                                         QStringLiteral("png"));
@@ -42,7 +44,7 @@ int main(int argc, char *argv[])
                                   QStringLiteral("number"));
     QCommandLineOption darkOption(QStringLiteral("dark"), QStringLiteral("强制深色方案（调试用）"));
     QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
-    parser.addOptions({openOption, ocrOption, screenshotOption, mockOption, purposeOption,
+    parser.addOptions({openOption, ocrOption, ocrCurrentOption, screenshotOption, mockOption, purposeOption,
                        selectOption, dropHintOption, pageOption, darkOption, lightOption});
     parser.process(app);
 
@@ -98,6 +100,12 @@ int main(int argc, char *argv[])
                              [scheduleShot] { scheduleShot(400); });
         }
         QTimer::singleShot(0, &window, &MainWindow::startOcrAll);
+    } else if (parser.isSet(ocrCurrentOption)) {
+        if (!screenshot.isEmpty()) {
+            QObject::connect(&window, &MainWindow::allFinished, &app,
+                             [scheduleShot] { scheduleShot(400); });
+        }
+        QTimer::singleShot(0, &window, &MainWindow::startOcrCurrent);
     } else if (!screenshot.isEmpty()) {
         scheduleShot(600);
     }

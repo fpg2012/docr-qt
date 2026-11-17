@@ -174,6 +174,16 @@ bool isTruncated(const QJsonObject &payload)
     return false;
 }
 
+bool hasText(const QJsonObject &payload)
+{
+    const QJsonArray pages = payload.value(QStringLiteral("pages")).toArray();
+    for (const QJsonValue &value : pages) {
+        if (!value.toObject().value(QStringLiteral("text")).toString().trimmed().isEmpty())
+            return true;
+    }
+    return false;
+}
+
 QColor colorForKind(const QString &kind)
 {
     if (kind == QLatin1String("title")) return QColor(230, 25, 75);
@@ -271,6 +281,7 @@ void Client::handleReply(QNetworkReply *reply, int page, int generation,
     result.purpose = purpose;
     result.elapsedMs = QDateTime::currentMSecsSinceEpoch() - started;
     const QByteArray raw = reply->readAll();
+    result.raw = raw;
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
     if (reply->error() != QNetworkReply::NoError && status == 0) {

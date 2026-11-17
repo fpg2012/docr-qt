@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt LANGUAGES CXX)
+project(docr-qt VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,8 @@ add_executable(docr-qt
     src/mainwindow.cpp
     resources.qrc
 )
+
+target_compile_definitions(docr-qt PRIVATE DOCR_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(docr-qt PRIVATE
     Qt6::Widgets

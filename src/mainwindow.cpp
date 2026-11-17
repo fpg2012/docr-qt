@@ -4,6 +4,7 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QCheckBox>
+#include <QDateTime>
 #include <QClipboard>
 #include <QCollator>
 #include <QComboBox>
@@ -32,13 +33,17 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTabWidget>
 #include <QTextStream>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QUrl>
 #include <QAbstractItemView>
 #include <QPalette>
@@ -73,6 +78,24 @@ QStringList localPaths(const QMimeData *mime)
             paths << url.toLocalFile();
     }
     return paths;
+}
+
+// 页面是否有墨迹：用于区分“空白页”和“服务端返回空结果”。
+bool pageHasInk(const QImage &image)
+{
+    if (image.isNull())
+        return false;
+    const QImage small = image.scaled(200, 200, Qt::KeepAspectRatio, Qt::FastTransformation)
+                             .convertToFormat(QImage::Format_Grayscale8);
+    int dark = 0;
+    for (int y = 0; y < small.height(); ++y) {
+        const uchar *line = small.constScanLine(y);
+        for (int x = 0; x < small.width(); ++x) {
+            if (line[x] < 100)
+                ++dark;
+        }
+    }
+    return dark * 100 > small.width() * small.height(); // 超过 1% 像素是深色
 }
 
 } // namespace
@@ -262,9 +285,9 @@ void MainWindow::buildActions()
     QAction *actual = make(QStringLiteral("actual-size"), QStringLiteral("原始大小"),
                            QKeySequence(QStringLiteral("Ctrl+0")),
                            [this] { m_view->resetZoom(); });
-    QAction *settings = make(QStringLiteral("settings"), QStringLiteral("设置"),
+    QAction *settings = make(QStringLiteral("settings"), QStringLiteral("首选项…"),
                              QKeySequence(QStringLiteral("Ctrl+,")),
-                             [this] { openSettings(); });
+                             [this] { openPreferences(); });
 
     toolbar->addAction(openPdf);
     toolbar->addAction(openImage);
@@ -319,6 +342,13 @@ void MainWindow::buildActions()
     toolbar->addSeparator();
     toolbar->addAction(settings);
 
+    auto *copySelectionAction = new QAction(QStringLiteral("复制选中文本"), this);
+    copySelectionAction->setShortcut(QKeySequence::Copy);
+    connect(copySelectionAction, &QAction::triggered, this, [this] { copySelection(); });
+    auto *copyPageAction = new QAction(QStringLiteral("复制本页文本"), this);
+    copyPageAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+C")));
+    connect(copyPageAction, &QAction::triggered, this, [this] { copyText(); });
+
     auto *fileMenu = menuBar()->addMenu(QStringLiteral("文件"));
     fileMenu->addAction(openPdf);
     fileMenu->addAction(openImage);
@@ -327,20 +357,18 @@ void MainWindow::buildActions()
     fileMenu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
     fileMenu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
     fileMenu->addSeparator();
-    fileMenu->addAction(QStringLiteral("复制选中文本"), QKeySequence::Copy, this,
-                        [this] { copySelection(); });
-    fileMenu->addAction(QStringLiteral("复制本页文本"),
-                        QKeySequence(QStringLiteral("Ctrl+Shift+C")), this,
-                        [this] { copyText(); });
-    fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
+
+    auto *editMenu = menuBar()->addMenu(QStringLiteral("编辑"));
+    editMenu->addAction(copySelectionAction);
+    editMenu->addAction(copyPageAction);
+    editMenu->addSeparator();
+    editMenu->addAction(settings);
 
     auto *ocrMenu = menuBar()->addMenu(QStringLiteral("识别"));
     ocrMenu->addAction(ocrPage);
     ocrMenu->addAction(ocrAll);
     ocrMenu->addAction(stop);
-    ocrMenu->addSeparator();
-    ocrMenu->addAction(settings);
 
     auto *viewMenu = menuBar()->addMenu(QStringLiteral("视图"));
     viewMenu->addAction(prevPage);
@@ -353,6 +381,10 @@ void MainWindow::buildActions()
     viewMenu->addAction(zoomIn);
     viewMenu->addAction(zoomOut);
     viewMenu->addAction(actual);
+
+    auto *helpMenu = menuBar()->addMenu(QStringLiteral("帮助"));
+    helpMenu->addAction(QStringLiteral("关于 docr-qt"), this, [this] { showAbout(); });
+    helpMenu->addAction(QStringLiteral("关于 Qt"), this, [this] { QApplication::aboutQt(); });
 }
 
 void MainWindow::applySettings()
@@ -391,35 +423,107 @@ void MainWindow::saveSettings()
     m_doc.setDpi(m_dpi);
 }
 
-void MainWindow::openSettings()
+void MainWindow::openPreferences()
 {
     QDialog dialog(this);
-    dialog.setWindowTitle(QStringLiteral("设置"));
+    dialog.setWindowTitle(QStringLiteral("首选项"));
+    dialog.resize(560, 0);
 
-    auto *layout = new QFormLayout(&dialog);
-    auto *keyEdit = new QLineEdit(m_apiKey, &dialog);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *tabs = new QTabWidget(&dialog);
+
+    // —— API ——
+    auto *apiPage = new QWidget(tabs);
+    auto *apiForm = new QFormLayout(apiPage);
+
+    auto *keyEdit = new QLineEdit(m_apiKey, apiPage);
     keyEdit->setEchoMode(QLineEdit::Password);
     keyEdit->setPlaceholderText(QStringLiteral("留空则使用 DEEPSEEK_API_KEY / DSH 凭据库"));
-    auto *remember = new QCheckBox(QStringLiteral("保存到本机设置"), &dialog);
+    auto *showKey = new QCheckBox(QStringLiteral("显示"), apiPage);
+    auto *keyRow = new QWidget(apiPage);
+    auto *keyLayout = new QHBoxLayout(keyRow);
+    keyLayout->setContentsMargins(0, 0, 0, 0);
+    keyLayout->addWidget(keyEdit, 1);
+    keyLayout->addWidget(showKey);
+    connect(showKey, &QCheckBox::toggled, keyEdit, [keyEdit](bool on) {
+        keyEdit->setEchoMode(on ? QLineEdit::Normal : QLineEdit::Password);
+    });
+
+    auto *remember = new QCheckBox(QStringLiteral("保存到本机设置"), apiPage);
     remember->setChecked(QSettings().value(QStringLiteral("rememberKey"), false).toBool());
-    auto *baseEdit = new QLineEdit(m_baseUrl, &dialog);
-    auto *dpiSpin = new QSpinBox(&dialog);
+
+    auto *useDsh = new QPushButton(QStringLiteral("载入 DSH 凭据库的 Key"), apiPage);
+    connect(useDsh, &QPushButton::clicked, this, [this, keyEdit] {
+        const QString key = ocr::dshApiKey();
+        if (key.isEmpty())
+            QMessageBox::information(this, QStringLiteral("没有找到 Key"),
+                                     QStringLiteral("环境变量和 ~/.dsh/.credentials.yaml 中都没有 Key。"));
+        else
+            keyEdit->setText(key);
+    });
+
+    auto *keyHint = new QLabel(
+        QStringLiteral("留空时依次使用 DEEPSEEK_API_KEY、DSH 凭据库"), apiPage);
+    keyHint->setWordWrap(true);
+    keyHint->setForegroundRole(QPalette::PlaceholderText);
+
+    auto *baseEdit = new QLineEdit(m_baseUrl, apiPage);
+    baseEdit->setPlaceholderText(QStringLiteral("https://api.deepseek.com/v1/tools"));
+
+    apiForm->addRow(QStringLiteral("API Key"), keyRow);
+    apiForm->addRow(QString(), remember);
+    apiForm->addRow(QString(), useDsh);
+    apiForm->addRow(QString(), keyHint);
+    apiForm->addRow(QStringLiteral("接口地址"), baseEdit);
+
+    // —— 识别 ——
+    auto *ocrPage = new QWidget(tabs);
+    auto *ocrForm = new QFormLayout(ocrPage);
+    auto *purposeCombo = new QComboBox(ocrPage);
+    purposeCombo->addItem(QStringLiteral("版面分析（带坐标框）"),
+                          QStringLiteral("rich_layout_recognition"));
+    purposeCombo->addItem(QStringLiteral("纯文本（更快）"), QStringLiteral("text_recognition"));
+    const int purposeIndex = purposeCombo->findData(m_purpose);
+    if (purposeIndex >= 0)
+        purposeCombo->setCurrentIndex(purposeIndex);
+
+    auto *dpiSpin = new QSpinBox(ocrPage);
     dpiSpin->setRange(72, 400);
     dpiSpin->setValue(m_dpi);
     dpiSpin->setSuffix(QStringLiteral(" dpi"));
-    auto *concSpin = new QSpinBox(&dialog);
+    auto *concSpin = new QSpinBox(ocrPage);
     concSpin->setRange(1, 8);
     concSpin->setValue(m_concurrency);
     concSpin->setToolTip(QStringLiteral("同时在途的 OCR 请求数；账号上限 15"));
 
-    layout->addRow(QStringLiteral("API Key"), keyEdit);
-    layout->addRow(QString(), remember);
-    layout->addRow(QStringLiteral("接口地址"), baseEdit);
-    layout->addRow(QStringLiteral("渲染精度"), dpiSpin);
-    layout->addRow(QStringLiteral("并发数"), concSpin);
+    auto *ocrHint = new QLabel(
+        QStringLiteral("「版面分析」返回带坐标的识别框；「纯文本」更快但没有框。"), ocrPage);
+    ocrHint->setWordWrap(true);
+    ocrHint->setForegroundRole(QPalette::PlaceholderText);
+
+    ocrForm->addRow(QStringLiteral("识别模式"), purposeCombo);
+    ocrForm->addRow(QStringLiteral("渲染精度"), dpiSpin);
+    ocrForm->addRow(QStringLiteral("并发数"), concSpin);
+    ocrForm->addRow(QString(), ocrHint);
+
+    tabs->addTab(apiPage, QStringLiteral("API"));
+    tabs->addTab(ocrPage, QStringLiteral("识别"));
+    layout->addWidget(tabs);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    layout->addRow(buttons);
+    auto *reset = buttons->addButton(QStringLiteral("恢复默认"), QDialogButtonBox::ResetRole);
+    connect(reset, &QPushButton::clicked, &dialog,
+            [keyEdit, remember, baseEdit, purposeCombo, dpiSpin, concSpin] {
+        keyEdit->clear();
+        remember->setChecked(false);
+        baseEdit->setText(QStringLiteral("https://api.deepseek.com/v1/tools"));
+        purposeCombo->setCurrentIndex(0);
+        dpiSpin->setValue(150);
+        concSpin->setValue(3);
+    });
+    layout->addWidget(buttons);
+    dialog.adjustSize();
+    dialog.resize(600, dialog.height());
     connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
@@ -430,12 +534,52 @@ void MainWindow::openSettings()
     if (m_apiKey.isEmpty())
         m_apiKey = ocr::dshApiKey();
     m_baseUrl = baseEdit->text().trimmed();
+    if (m_baseUrl.isEmpty())
+        m_baseUrl = QStringLiteral("https://api.deepseek.com/v1/tools");
     m_dpi = dpiSpin->value();
     m_concurrency = concSpin->value();
-    QSettings().setValue(QStringLiteral("rememberKey"), remember->isChecked());
+    m_purpose = purposeCombo->currentData().toString();
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("rememberKey"), remember->isChecked());
+    if (remember->isChecked())
+        settings.setValue(QStringLiteral("apiKey"), m_apiKey);
+    else
+        settings.remove(QStringLiteral("apiKey"));
     saveSettings();
-    m_client.configure(m_baseUrl, m_apiKey);
-    statusBar()->showMessage(QStringLiteral("设置已保存"), 2500);
+
+    if (m_purposeBox) {
+        const int index = m_purposeBox->findData(m_purpose);
+        if (index >= 0) {
+            QSignalBlocker blocker(m_purposeBox);
+            m_purposeBox->setCurrentIndex(index);
+        }
+    }
+    statusBar()->showMessage(QStringLiteral("首选项已保存"), 2500);
+}
+
+void MainWindow::showAbout()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("关于 docr-qt"));
+    box.setIconPixmap(theme::appIcon().pixmap(72, 72));
+    box.setTextFormat(Qt::RichText);
+    box.setText(QStringLiteral(
+                    "<h3>docr-qt %1</h3>"
+                    "<p>DeepSeek OCR 的 Qt 6 桌面客户端。<br>"
+                    "拖入 PDF / 图片，逐页识别并把版面框叠加在页面上；"
+                    "结果可复制、导出 Markdown / JSON。</p>"
+                    "<p><b>Qt</b> %2<br>"
+                    "<b>接口</b> %3<br>"
+                    "<b>识别模式</b> %4</p>"
+                    "<p>识别结果只保存在本机内存，导出时才写文件。</p>")
+                    .arg(QStringLiteral(DOCR_VERSION), QString::fromLatin1(qVersion()),
+                         m_baseUrl.toHtmlEscaped(),
+                         m_purpose == QStringLiteral("text_recognition")
+                             ? QStringLiteral("纯文本")
+                             : QStringLiteral("版面分析")));
+    box.setStandardButtons(QMessageBox::Ok);
+    box.exec();
 }
 
 bool MainWindow::loadPath(const QString &path)
@@ -474,6 +618,8 @@ void MainWindow::openPaths(const QStringList &paths)
     m_generation++;
     m_pending.clear();
     m_running.clear();
+    m_emptyRetries.clear();
+    m_batchMode = false;
     m_allDoneEmitted = true;
     if (m_stopAction)
         m_stopAction->setEnabled(false);
@@ -646,17 +792,33 @@ void MainWindow::updatePanels()
         QJsonDocument(entry.result.payload).toJson(QJsonDocument::Indented)));
 
     m_blocks->setBlocks(entry.result.blocks, m_pageImage);
-    if (entry.result.blocks.isEmpty())
-        m_blocks->showPlaceholder(entry.result.purpose
-                                          == QStringLiteral("rich_layout_recognition")
-                                      ? QStringLiteral("本页没有可显示的版面块")
-                                      : QStringLiteral("当前模式只返回纯文本\n改用「版面分析」可得到带坐标的块"));
+    m_textView->setPlaceholderText(QStringLiteral("识别结果会显示在这里"));
+    if (entry.result.blocks.isEmpty()) {
+        if (entry.result.purpose != QStringLiteral("rich_layout_recognition")) {
+            m_blocks->showPlaceholder(
+                QStringLiteral("当前模式只返回纯文本\n改用「版面分析」可得到带坐标的块"));
+        } else if (!ocr::hasText(entry.result.payload)) {
+            if (!pageHasInk(m_pageImage)) {
+                m_textView->setPlaceholderText(QStringLiteral("本页没有可识别的文字"));
+                m_blocks->showPlaceholder(QStringLiteral("空白页（没有文字）"));
+            } else {
+                m_textView->setPlaceholderText(
+                    QStringLiteral("服务端未返回文字；可点「识别本页」重试"));
+                m_blocks->showPlaceholder(
+                    m_emptyRetries.contains(index)
+                        ? QStringLiteral("服务端未返回文字\n已自动重试一次，可再点「识别本页」")
+                        : QStringLiteral("服务端未返回文字\n点「识别本页」重试"));
+            }
+        } else {
+            m_blocks->showPlaceholder(QStringLiteral("本页没有可显示的版面块"));
+        }
+    }
     m_selLabel->hide();
 }
 
 void MainWindow::updateStats()
 {
-    int done = 0, failed = 0, tokens = 0;
+    int done = 0, failed = 0, emptyPages = 0, tokens = 0;
     double seconds = 0.0;
     for (int i = 0; i < m_doc.count(); ++i) {
         const PageEntry &entry = m_doc.page(i);
@@ -664,6 +826,10 @@ void MainWindow::updateStats()
             ++done;
             tokens += entry.result.usage().value(QStringLiteral("total_tokens")).toInt();
             seconds += entry.result.elapsedMs / 1000.0;
+            if (entry.result.purpose == QStringLiteral("rich_layout_recognition")
+                && entry.result.blocks.isEmpty() && !ocr::hasText(entry.result.payload)) {
+                ++emptyPages;
+            }
         } else if (!entry.result.error.isEmpty()) {
             ++failed;
         }
@@ -678,10 +844,20 @@ void MainWindow::updateStats()
                              .arg(cost, 0, 'f', 4);
     if (failed > 0)
         text += QStringLiteral(" · %1 页失败").arg(failed);
+    if (emptyPages > 0)
+        text += QStringLiteral(" · %1 页空结果").arg(emptyPages);
+    const bool busy = !m_pending.isEmpty() || !m_running.isEmpty();
+    if (busy)
+        text += QStringLiteral(" · 识别中");
     m_statsLabel->setText(text);
-    m_progress->setVisible(!m_pending.isEmpty() || !m_running.isEmpty());
-    m_progress->setRange(0, qMax(1, m_doc.count()));
-    m_progress->setValue(done);
+    m_progress->setVisible(busy);
+    if (busy && !m_batchMode) {
+        // 单页请求：用忙碌指示器，避免进度条看起来停在原地。
+        m_progress->setRange(0, 0);
+    } else {
+        m_progress->setRange(0, qMax(1, m_doc.count()));
+        m_progress->setValue(done);
+    }
 }
 
 void MainWindow::startOcrAll()
@@ -695,16 +871,58 @@ void MainWindow::startOcrAll()
         if (!m_doc.page(i).hasResult())
             pages.append(i);
     }
+    if (pages.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("所有页面都已识别"), 3000);
+        return;
+    }
+    m_batchMode = true;
+    m_emptyRetries.clear();
+    statusBar()->showMessage(QStringLiteral("开始识别 %1 页…").arg(pages.size()), 3000);
     enqueuePages(pages);
 }
 
 void MainWindow::startOcrCurrent()
 {
     const int index = m_pageList->currentRow();
-    if (index < 0)
+    if (index < 0 || index >= m_doc.count()) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
         return;
+    }
+
+    m_batchMode = false;
+    m_emptyRetries.remove(index);
+    m_allDoneEmitted = false;
+    if (m_stopAction)
+        m_stopAction->setEnabled(true);
+
+    if (m_running.contains(index)) {
+        statusBar()->showMessage(
+            QStringLiteral("第 %1 页正在识别中，请稍候…").arg(index + 1), 2000);
+        return;
+    }
+
+    // 立刻给出反馈，避免网络请求期间看起来“没反应”。
     m_doc.page(index).result = ocr::PageResult();
-    enqueuePages({index});
+    if (auto *item = m_pageList->item(index)) {
+        item->setText(QStringLiteral("%1 ⏳").arg(index + 1));
+        item->setForeground(theme::tone(QColor(245, 158, 11)));
+        item->setToolTip(m_doc.page(index).label);
+    }
+    if (m_pending.contains(index)) {
+        // 已经在队列里：提到队首，稍后马上处理。
+        QQueue<int> reordered;
+        reordered.enqueue(index);
+        for (int pending : m_pending) {
+            if (pending != index)
+                reordered.enqueue(pending);
+        }
+        m_pending = reordered;
+    } else {
+        m_pending.enqueue(index);
+    }
+    statusBar()->showMessage(QStringLiteral("正在识别第 %1 页…").arg(index + 1), 2000);
+    pumpQueue();
+    updateStats();
 }
 
 void MainWindow::enqueuePages(const QVector<int> &pages)
@@ -771,18 +989,92 @@ void MainWindow::onResult(int page, int generation, const ocr::PageResult &resul
     if (generation != m_generation)
         return;
     m_running.remove(page);
-    if (page >= 0 && page < m_doc.count())
-        m_doc.page(page).result = result;
+    if (page < 0 || page >= m_doc.count()) {
+        pumpQueue();
+        return;
+    }
+
+    const bool rich = result.purpose == QStringLiteral("rich_layout_recognition");
+    const bool empty = result.ok() && rich && result.blocks.isEmpty()
+                       && !ocr::hasText(result.payload);
+    const bool hasInk = pageHasInk(m_doc.ensureImage(page));
+
+    // 页面明明有内容、服务端却没返回任何文字：多半是偶发的空响应，自动重试一次。
+    if (empty && !m_emptyRetries.contains(page) && hasInk) {
+        m_emptyRetries.insert(page);
+        m_doc.page(page).result = ocr::PageResult();
+        if (auto *item = m_pageList->item(page)) {
+            item->setText(QStringLiteral("%1 ↻").arg(page + 1));
+            item->setForeground(theme::tone(QColor(245, 158, 11)));
+            item->setToolTip(QStringLiteral("%1\n服务端返回空结果，正在自动重试")
+                                 .arg(m_doc.page(page).label));
+        }
+        statusBar()->showMessage(
+            QStringLiteral("第 %1 页返回空结果，正在自动重试…").arg(page + 1), 5000);
+        m_pending.enqueue(page);
+        updateStats();
+        pumpQueue();
+        return;
+    }
+
+    m_doc.page(page).result = result;
 
     if (auto *item = m_pageList->item(page)) {
-        if (result.ok()) {
-            item->setText(QStringLiteral("%1 ✓").arg(page + 1));
-            item->setForeground(theme::tone(QColor(34, 197, 94)));
-        } else {
+        if (!result.ok()) {
             item->setText(QStringLiteral("%1 ✕").arg(page + 1));
             item->setForeground(theme::tone(QColor(239, 68, 68)));
             item->setToolTip(QStringLiteral("%1\n%2").arg(m_doc.page(page).label, result.error));
+        } else if (rich && result.blocks.isEmpty() && empty && hasInk) {
+            item->setText(QStringLiteral("%1 !").arg(page + 1));
+            item->setForeground(theme::tone(QColor(245, 158, 11)));
+            item->setToolTip(QStringLiteral("%1\n未返回文字（服务端空结果），可重试")
+                                 .arg(m_doc.page(page).label));
+        } else if (rich && result.blocks.isEmpty() && empty) {
+            // 空白页：没有文字是正常的，不标成异常。
+            item->setText(QStringLiteral("%1 ✓").arg(page + 1));
+            item->setForeground(theme::tone(QColor(34, 197, 94)));
+            item->setToolTip(QStringLiteral("%1\n空白页（无文字）").arg(m_doc.page(page).label));
+        } else if (rich && result.blocks.isEmpty()) {
+            item->setText(QStringLiteral("%1 !").arg(page + 1));
+            item->setForeground(theme::tone(QColor(245, 158, 11)));
+            item->setToolTip(QStringLiteral("%1\n未返回版面块").arg(m_doc.page(page).label));
+        } else {
+            item->setText(QStringLiteral("%1 ✓").arg(page + 1));
+            item->setForeground(theme::tone(QColor(34, 197, 94)));
+            item->setToolTip(m_doc.page(page).label);
         }
+    }
+
+    if (empty) {
+        if (!hasInk) {
+            statusBar()->showMessage(
+                QStringLiteral("第 %1 页没有文字（空白页）").arg(page + 1), 3000);
+        } else {
+            QString message = QStringLiteral(
+                                  "第 %1 页未返回文字（服务端空结果），可再点「识别本页」重试")
+                                  .arg(page + 1);
+            const QString diagnostics = saveEmptyDiagnostics(page, result);
+            if (!diagnostics.isEmpty()) {
+                message += QStringLiteral("；诊断：%1").arg(diagnostics);
+                if (auto *item = m_pageList->item(page)) {
+                    item->setToolTip(item->toolTip()
+                                     + QStringLiteral("\n诊断：%1").arg(diagnostics));
+                }
+            }
+            statusBar()->showMessage(message, 10000);
+        }
+    } else if (m_emptyRetries.contains(page)) {
+        statusBar()->showMessage(QStringLiteral("第 %1 页重试成功").arg(page + 1), 2500);
+    } else if (!result.ok()) {
+        statusBar()->showMessage(
+            QStringLiteral("第 %1 页识别失败：%2").arg(page + 1).arg(result.error), 5000);
+    } else {
+        statusBar()->showMessage(
+            QStringLiteral("第 %1 页识别完成%2")
+                .arg(page + 1)
+                .arg(rich ? QStringLiteral(" · %1 个块").arg(result.blocks.size())
+                          : QString()),
+            2500);
     }
     if (page == m_pageList->currentRow())
         showPage(page);
@@ -795,6 +1087,8 @@ void MainWindow::stopOcr()
     m_generation++;
     m_pending.clear();
     m_running.clear();
+    m_emptyRetries.clear();
+    m_batchMode = false;
     if (m_stopAction)
         m_stopAction->setEnabled(false);
     statusBar()->showMessage(QStringLiteral("已停止"), 2500);
@@ -845,6 +1139,49 @@ void MainWindow::exportJson()
     if (!file.open(QIODevice::WriteOnly))
         return;
     file.write(QJsonDocument(pages).toJson(QJsonDocument::Indented));
+}
+
+QString MainWindow::saveEmptyDiagnostics(int page, const ocr::PageResult &result)
+{
+    const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation)
+                        + QStringLiteral("/docr-qt/ocr-empty");
+    if (!QDir().mkpath(dir))
+        return {};
+
+    const QString stamp = QDateTime::currentDateTime().toString(
+        QStringLiteral("yyyyMMdd-HHmmss"));
+    const QString base = QStringLiteral("%1/page-%2-%3").arg(dir).arg(page + 1).arg(stamp);
+
+    QJsonObject meta;
+    meta.insert(QStringLiteral("page"), page + 1);
+    meta.insert(QStringLiteral("source"), m_doc.page(page).label);
+    meta.insert(QStringLiteral("purpose"), result.purpose);
+    meta.insert(QStringLiteral("baseUrl"), m_baseUrl);
+    meta.insert(QStringLiteral("dpi"), m_dpi);
+    meta.insert(QStringLiteral("elapsedMs"), double(result.elapsedMs));
+    meta.insert(QStringLiteral("usage"), result.usage());
+    meta.insert(QStringLiteral("error"), result.error);
+    const QJsonArray pages = result.payload.value(QStringLiteral("pages")).toArray();
+    if (!pages.isEmpty())
+        meta.insert(QStringLiteral("finish_reason"),
+                    pages.first().toObject().value(QStringLiteral("finish_reason")));
+
+    QJsonObject wrapper;
+    wrapper.insert(QStringLiteral("meta"), meta);
+    wrapper.insert(QStringLiteral("response"), result.payload);
+    QFile json(base + QStringLiteral(".json"));
+    if (json.open(QIODevice::WriteOnly))
+        json.write(QJsonDocument(wrapper).toJson(QJsonDocument::Indented));
+
+    QFile rawFile(base + QStringLiteral(".response.json"));
+    if (rawFile.open(QIODevice::WriteOnly) && !result.raw.isEmpty())
+        rawFile.write(result.raw);
+
+    const QImage image = m_doc.ensureImage(page);
+    if (!image.isNull())
+        image.save(base + QStringLiteral(".png"), "PNG");
+
+    return base;
 }
 
 void MainWindow::copyText()

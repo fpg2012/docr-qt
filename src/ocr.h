@@ -22,6 +22,7 @@ struct PageResult {
     int page = -1;
     QString purpose;
     QJsonObject payload;
+    QByteArray raw; // 原始响应体，便于空结果/异常诊断
     QVector<Block> blocks;
     qint64 elapsedMs = 0;
     QString error;
@@ -47,6 +48,9 @@ QString kindLabel(const QString &kind);
 
 // 页级输出是否因长度被截断。
 bool isTruncated(const QJsonObject &payload);
+
+// 响应里是否有任何非空文字（用于识别“服务端空结果”）。
+bool hasText(const QJsonObject &payload);
 
 // 颜色按块类型区分，供叠加层和列表使用。
 QColor colorForKind(const QString &kind);
