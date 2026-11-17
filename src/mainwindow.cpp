@@ -25,6 +25,7 @@
 #include <QPlainTextEdit>
 #include <QPixmap>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -50,6 +51,7 @@
 #include "blockcards.h"
 #include "core/exporters.h"
 #include "core/ocrdiagnostics.h"
+#include "core/pdfexport.h"
 #include "pageview.h"
 #include "preferences.h"
 #include "theme.h"
@@ -460,6 +462,8 @@ void MainWindow::buildActions()
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
     fileMenu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
+    fileMenu->addAction(QStringLiteral("导出可搜索 PDF…"), this,
+                        [this] { exportSearchablePdf(); });
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
 
@@ -1379,6 +1383,96 @@ void MainWindow::exportJson()
     QString error;
     if (!exporters::writeJson(m_doc, path, &error))
         QMessageBox::warning(this, QStringLiteral("导出失败"), error);
+}
+
+QVector<OutlineEntry> MainWindow::outlineForExport() const
+{
+    const QVector<OutlineEntry> &builtin = m_doc.outline();
+    const bool hasBoth = !builtin.isEmpty() && !m_ocrOutline.isEmpty();
+    const bool replace = hasBoth && m_replaceOutline && m_replaceOutline->isChecked();
+
+    QVector<OutlineEntry> result;
+    if (!replace)
+        result += builtin;
+    if (!m_ocrOutline.isEmpty()) {
+        if (replace || builtin.isEmpty()) {
+            result += m_ocrOutline;
+        } else {
+            OutlineEntry root;
+            root.title = QStringLiteral("OCR 目录");
+            root.page = -1;
+            root.children = m_ocrOutline;
+            result.append(root);
+        }
+    }
+    return result;
+}
+
+void MainWindow::exportSearchablePdf()
+{
+    if (m_doc.count() == 0)
+        return;
+
+    int pagesWithText = 0;
+    for (int i = 0; i < m_doc.count(); ++i) {
+        const PageEntry &entry = m_doc.page(i);
+        if (entry.result.ok()
+            && (!entry.result.blocks.isEmpty()
+                || !ocr::plainText(entry.result.payload, entry.result.purpose).trimmed().isEmpty()))
+            ++pagesWithText;
+    }
+    if (pagesWithText == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("没有可嵌入的文本"),
+            QStringLiteral("请先识别至少一页，再导出可搜索 PDF。"));
+        return;
+    }
+
+    QString base = QStringLiteral("ocr");
+    if (!m_doc.sourcePath().isEmpty()) {
+        const QFileInfo info(m_doc.sourcePath());
+        const QString name = info.isDir() ? info.fileName() : info.completeBaseName();
+        if (!name.isEmpty())
+            base = name;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出可搜索 PDF"),
+        QDir::homePath() + QLatin1Char('/') + base + QStringLiteral("-ocr.pdf"),
+        QStringLiteral("PDF (*.pdf)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive))
+        path += QStringLiteral(".pdf");
+
+    QProgressDialog progress(QStringLiteral("正在写入文本层和大纲…"),
+                             QStringLiteral("取消"), 0, m_doc.count(), this);
+    progress.setWindowTitle(QStringLiteral("导出可搜索 PDF"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.show();
+
+    QString error;
+    const bool ok = pdfexport::writeSearchablePdf(
+        m_doc, outlineForExport(), path, &error, [&](int done, int total) {
+            progress.setMaximum(total);
+            progress.setValue(done);
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        });
+    progress.close();
+
+    if (!ok) {
+        if (error == QStringLiteral("已取消")) {
+            statusBar()->showMessage(QStringLiteral("已取消导出"), 3000);
+        } else {
+            QMessageBox::warning(this, QStringLiteral("导出失败"),
+                                 error.isEmpty() ? QStringLiteral("无法写入 PDF") : error);
+        }
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("已导出可搜索 PDF：%1").arg(path), 8000);
 }
 
 void MainWindow::copyText()

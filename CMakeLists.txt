@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt VERSION 0.4.0 LANGUAGES CXX)
+project(docr-qt VERSION 0.5.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +7,7 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Widgets)
+find_package(qpdf REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
 pkg_check_modules(QT6SVG REQUIRED IMPORTED_TARGET Qt6Svg)
@@ -19,6 +20,8 @@ add_library(docr-core STATIC
     src/core/exporters.cpp
     src/core/ocrdiagnostics.cpp
     src/core/tocparser.cpp
+    src/core/pdfexport.cpp
+    src/core/unicodenormalize.cpp
 )
 target_include_directories(docr-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(docr-core PUBLIC DOCR_VERSION="${PROJECT_VERSION}")
@@ -27,6 +30,7 @@ target_link_libraries(docr-core PUBLIC
     Qt6::Gui
     Qt6::Network
     PkgConfig::POPPLER_QT6
+    qpdf::libqpdf
 )
 
 add_executable(docr-qt

@@ -148,7 +148,7 @@ void showAboutDialog(const QString &baseUrl, const QString &purpose, QWidget *pa
                     "<h3>docr-qt %1</h3>"
                     "<p>DeepSeek OCR 的 Qt 6 桌面客户端。<br>"
                     "拖入 PDF / 图片，逐页识别并把版面框叠加在页面上；"
-                    "结果可复制、导出 Markdown / JSON。</p>"
+                    "结果可复制、导出 Markdown / JSON / 可搜索 PDF。</p>"
                     "<p><b>Qt</b> %2<br>"
                     "<b>接口</b> %3<br>"
                     "<b>识别模式</b> %4</p>"

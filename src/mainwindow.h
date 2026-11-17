@@ -91,6 +91,8 @@ private:
 
     void exportMarkdown();
     void exportJson();
+    void exportSearchablePdf();
+    QVector<OutlineEntry> outlineForExport() const;
     void copyText();
     void copySelection();
     void showSelectionStatus();
