@@ -93,7 +93,9 @@ private:
         QGraphicsPixmapItem *pixmap = nullptr;
         QVector<ocr::Block> blocks;
         QVector<int> order;          // 页面内阅读顺序
-        QVector<int> flatIndex;      // 每个块在 m_flat 里的下标
+        QVector<int> flatIndex;      // 每个块在页面内的顺序（0 起）
+        int flatStart = 0;           // 本页在 m_flat 里的起点
+        int flatCount = 0;
         bool itemsBuilt = false;
         bool imageLoaded = false;
     };
@@ -114,14 +116,18 @@ private:
     };
 
     void rebuildBlocks();
+    void rebuildPageOrder(int page);
+    void replacePageBlocks(int page);
     void rebuildTextFlow();
     void clearBlockItems();
+    void clearPageItems(int page);
     void ensurePageLoaded(int page);
     void ensurePageItems(int page);
     void unloadPage(int page);
     void ensureVisiblePages();
     void updateCurrentPageFromScroll();
     int pageAtY(qreal sceneY) const;
+    void visiblePageRange(const QRectF &sceneRect, int *first, int *last) const;
     int blockAtScene(const QPointF &scenePos) const;
     int blockAt(const QPoint &viewportPos) const;
     int flatForBlock(int page, int block) const;
@@ -151,6 +157,7 @@ private:
     QVector<PageLayout> m_pages;
     mutable QVector<FlatBlock> m_flat;
     QVector<BoxRef> m_items;
+    QSet<int> m_loadedPages;
     QGraphicsScene *m_scene = nullptr;
     QSet<int> m_selection;  // flat 下标
     QSet<int> m_bandBase;

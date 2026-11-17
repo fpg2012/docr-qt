@@ -205,6 +205,7 @@ void PageView::clearPage()
     m_banding = false;
     m_band = nullptr;
     m_items.clear();
+    m_loadedPages.clear();
     m_flat.clear();
     m_pages.clear();
     m_flowText.clear();
@@ -237,7 +238,8 @@ void PageView::refreshPage(int page)
     }
     clearTextSelection();
     applySelection({}, false);
-    rebuildBlocks();
+    // 只替换本页的平面块，避免每识别完一页都重排整本 500 页。
+    replacePageBlocks(page);
     ensureVisiblePages();
     emit selectionChanged({});
     update();
@@ -266,35 +268,44 @@ void PageView::updateBackground()
     }
 }
 
+void PageView::rebuildPageOrder(int page)
+{
+    PageLayout &layout = m_pages[page];
+    layout.order.resize(layout.blocks.size());
+    for (int i = 0; i < layout.blocks.size(); ++i)
+        layout.order[i] = i;
+
+    const auto topOf = [&layout](int index) {
+        if (layout.blocks.at(index).boxes.isEmpty())
+            return 1e9;
+        return layout.blocks.at(index).boxes.first().top();
+    };
+    const auto leftOf = [&layout](int index) {
+        if (layout.blocks.at(index).boxes.isEmpty())
+            return 1e9;
+        return layout.blocks.at(index).boxes.first().left();
+    };
+    std::stable_sort(layout.order.begin(), layout.order.end(), [&](int a, int b) {
+        if (qAbs(topOf(a) - topOf(b)) > 6.0)
+            return topOf(a) < topOf(b);
+        return leftOf(a) < leftOf(b);
+    });
+
+    layout.flatIndex = QVector<int>(layout.blocks.size(), -1);
+    for (int position = 0; position < layout.order.size(); ++position)
+        layout.flatIndex[layout.order.at(position)] = position;
+}
+
 void PageView::rebuildBlocks()
 {
     clearBlockItems();
     m_flat.clear();
 
-    for (PageLayout &page : m_pages) {
-        page.order.resize(page.blocks.size());
-        for (int i = 0; i < page.blocks.size(); ++i)
-            page.order[i] = i;
-        const auto topOf = [&page](int index) {
-            if (page.blocks.at(index).boxes.isEmpty())
-                return 1e9;
-            return page.blocks.at(index).boxes.first().top();
-        };
-        const auto leftOf = [&page](int index) {
-            if (page.blocks.at(index).boxes.isEmpty())
-                return 1e9;
-            return page.blocks.at(index).boxes.first().left();
-        };
-        std::stable_sort(page.order.begin(), page.order.end(), [&](int a, int b) {
-            if (qAbs(topOf(a) - topOf(b)) > 6.0)
-                return topOf(a) < topOf(b);
-            return leftOf(a) < leftOf(b);
-        });
-        page.flatIndex = QVector<int>(page.blocks.size(), -1);
-    }
-
     for (int p = 0; p < m_pages.size(); ++p) {
         PageLayout &page = m_pages[p];
+        rebuildPageOrder(p);
+        page.flatStart = m_flat.size();
+        page.flatCount = page.order.size();
         for (int b : page.order) {
             const ocr::Block &block = page.blocks.at(b);
             FlatBlock flat;
@@ -302,16 +313,75 @@ void PageView::rebuildBlocks()
             flat.block = b;
             flat.box = blockRect(page.rect, block);
             flat.text = ocr::displayText(block.text);
-            page.flatIndex[b] = m_flat.size();
             m_flat.append(flat);
         }
     }
     rebuildTextFlow();
 }
 
+void PageView::replacePageBlocks(int page)
+{
+    if (page < 0 || page >= m_pages.size())
+        return;
+
+    clearPageItems(page);
+    PageLayout &layout = m_pages[page];
+    rebuildPageOrder(page);
+
+    QVector<FlatBlock> fresh;
+    fresh.reserve(layout.order.size());
+    for (int b : layout.order) {
+        const ocr::Block &block = layout.blocks.at(b);
+        FlatBlock flat;
+        flat.page = page;
+        flat.block = b;
+        flat.box = blockRect(layout.rect, block);
+        flat.text = ocr::displayText(block.text);
+        fresh.append(flat);
+    }
+
+    const int oldCount = layout.flatCount;
+    const int delta = fresh.size() - oldCount;
+    const int start = layout.flatStart;
+
+    if (oldCount > 0)
+        m_flat.remove(start, oldCount);
+    for (int i = page + 1; i < m_pages.size(); ++i)
+        m_pages[i].flatStart += delta;
+    if (!fresh.isEmpty()) {
+        m_flat.insert(start, fresh.size(), FlatBlock());
+        for (int i = 0; i < fresh.size(); ++i)
+            m_flat[start + i] = fresh.at(i);
+    }
+
+    layout.flatStart = start;
+    layout.flatCount = fresh.size();
+    if (m_hover >= start + oldCount)
+        m_hover += delta;
+    else if (m_hover >= start)
+        m_hover = -1;
+
+    // 后面的页已经建好的框仍指向旧 flat 下标，统一平移。
+    for (BoxRef &ref : m_items) {
+        if (ref.page > page)
+            ref.flat += delta;
+    }
+
+    rebuildTextFlow();
+}
+
 void PageView::rebuildTextFlow()
 {
     m_flowText.clear();
+    qsizetype needed = 0;
+    for (const FlatBlock &block : m_flat) {
+        if (block.text.isEmpty())
+            continue;
+        needed += block.text.size() + 1;
+    }
+    if (m_flowText.capacity() < needed)
+        m_flowText.reserve(needed);
+
     bool first = true;
     for (FlatBlock &block : m_flat) {
         if (block.text.isEmpty()) {
@@ -335,6 +405,19 @@ void PageView::clearBlockItems()
         page.itemsBuilt = false;
 }
 
+void PageView::clearPageItems(int page)
+{
+    if (page < 0 || page >= m_pages.size())
+        return;
+    for (int i = m_items.size() - 1; i >= 0; --i) {
+        if (m_items.at(i).page != page)
+            continue;
+        delete m_items.at(i).item;
+        m_items.removeAt(i);
+    }
+    m_pages[page].itemsBuilt = false;
+}
+
 void PageView::ensurePageItems(int page)
 {
     if (page < 0 || page >= m_pages.size())
@@ -347,13 +430,12 @@ void PageView::ensurePageItems(int page)
         return;
 
     for (int b : layout.order) {
-        const int flat = layout.flatIndex.value(b, -1);
+        const int flat = flatForBlock(page, b);
         if (flat < 0 || flat >= m_flat.size())
             continue;
         const ocr::Block &block = layout.blocks.at(b);
         for (const QRectF &box : block.boxes) {
             auto *item = new QGraphicsRectItem(pageBox(layout.rect, box));
-            item->setData(0, flat);
             item->setZValue(10);
             item->setToolTip(ocr::displayText(block.text).left(400));
             item->setVisible(m_boxesVisible);
@@ -385,6 +467,7 @@ void PageView::ensurePageLoaded(int page)
             layout.pixmap->setPos(layout.rect.topLeft());
             layout.pixmap->setVisible(true);
             layout.imageLoaded = true;
+            m_loadedPages.insert(page);
         }
     }
     ensurePageItems(page);
@@ -401,13 +484,8 @@ void PageView::unloadPage(int page)
         layout.pixmap = nullptr;
     }
     layout.imageLoaded = false;
-    for (int i = m_items.size() - 1; i >= 0; --i) {
-        if (m_items.at(i).page != page)
-            continue;
-        delete m_items.at(i).item;
-        m_items.removeAt(i);
-    }
-    layout.itemsBuilt = false;
+    m_loadedPages.remove(page);
+    clearPageItems(page);
     if (m_doc)
         m_doc->releaseImage(page);
 }
@@ -421,29 +499,84 @@ void PageView::ensureVisiblePages()
     const QRectF load = visible.adjusted(0, -h * 0.75, 0, h * 0.75);
     const QRectF keep = visible.adjusted(0, -h * 1.75, 0, h * 1.75);
 
-    for (int i = 0; i < m_pages.size(); ++i) {
-        const QRectF &rect = m_pages.at(i).rect;
-        if (load.intersects(rect)) {
+    int first = 0;
+    int last = -1;
+    visiblePageRange(load, &first, &last);
+    for (int i = first; i <= last; ++i) {
+        if (m_pages.at(i).rect.intersects(load))
             ensurePageLoaded(i);
-        } else if (!keep.intersects(rect)) {
-            if (m_pages.at(i).imageLoaded)
-                unloadPage(i);
-            else
-                m_doc->releaseImage(i); // OCR 上传等路径可能留下整页缓存
+    }
+
+    // 已经载入的页不多，按集合回收 pixmap；下面的图片缓存检查只做轻量遍历。
+    for (auto it = m_loadedPages.begin(); it != m_loadedPages.end();) {
+        const int i = *it;
+        if (!keep.intersects(m_pages.at(i).rect)) {
+            it = m_loadedPages.erase(it);
+            unloadPage(i);
+        } else {
+            ++it;
         }
     }
+
+    // OCR 上传等路径可能留下没有 pixmap 的整页缓存；只保留 keep 区。
+    for (int i = 0; i < m_pages.size(); ++i) {
+        if (!m_loadedPages.contains(i) && !keep.intersects(m_pages.at(i).rect))
+            m_doc->releaseImage(i);
+    }
+}
+
+void PageView::visiblePageRange(const QRectF &sceneRect, int *first, int *last) const
+{
+    *first = 0;
+    *last = -1;
+    if (m_pages.isEmpty() || sceneRect.isEmpty())
+        return;
+
+    int lo = 0;
+    int hi = m_pages.size() - 1;
+    int begin = m_pages.size();
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (m_pages.at(mid).rect.bottom() < sceneRect.top()) {
+            lo = mid + 1;
+        } else {
+            begin = mid;
+            hi = mid - 1;
+        }
+    }
+
+    lo = 0;
+    hi = m_pages.size() - 1;
+    int end = -1;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (m_pages.at(mid).rect.top() <= sceneRect.bottom()) {
+            end = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    *first = qBound(0, begin, m_pages.size() - 1);
+    *last = end;
 }
 
 int PageView::pageAtY(qreal sceneY) const
 {
     if (m_pages.isEmpty())
         return -1;
+    int lo = 0;
+    int hi = m_pages.size() - 1;
     int result = 0;
-    for (int i = 0; i < m_pages.size(); ++i) {
-        if (m_pages.at(i).rect.top() <= sceneY + 0.5)
-            result = i;
-        else
-            break;
+    while (lo <= hi) {
+        const int mid = (lo + hi) / 2;
+        if (m_pages.at(mid).rect.top() <= sceneY + 0.5) {
+            result = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
+        }
     }
     return result;
 }
@@ -453,9 +586,13 @@ void PageView::updateCurrentPageFromScroll()
     if (m_pages.isEmpty())
         return;
     const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
+    int first = 0;
+    int last = -1;
+    visiblePageRange(visible, &first, &last);
+
     int best = -1;
     qreal bestArea = 0;
-    for (int i = 0; i < m_pages.size(); ++i) {
+    for (int i = first; i <= last; ++i) {
         const QRectF inter = m_pages.at(i).rect.intersected(visible);
         const qreal area = inter.width() * inter.height();
         if (area > bestArea) {
@@ -502,7 +639,9 @@ int PageView::flatForBlock(int page, int block) const
 {
     if (page < 0 || page >= m_pages.size())
         return -1;
-    return m_pages.at(page).flatIndex.value(block, -1);
+    const PageLayout &layout = m_pages.at(page);
+    const int local = layout.flatIndex.value(block, -1);
+    return local < 0 ? -1 : layout.flatStart + local;
 }
 
 int PageView::localBlock(int flat) const
@@ -645,7 +784,7 @@ QVector<int> PageView::selection() const
     const PageLayout &page = m_pages.at(m_currentPage);
     QVector<int> result;
     for (int b : page.order) {
-        const int flat = page.flatIndex.value(b, -1);
+        const int flat = flatForBlock(m_currentPage, b);
         if (flat >= 0 && m_selection.contains(flat))
             result.append(b);
     }
@@ -662,7 +801,7 @@ QString PageView::selectedText() const
     const PageLayout &page = m_pages.at(m_currentPage);
     QStringList parts;
     for (int b : page.order) {
-        const int flat = page.flatIndex.value(b, -1);
+        const int flat = flatForBlock(m_currentPage, b);
         if (flat < 0 || !m_selection.contains(flat))
             continue;
         const QString text = m_flat.at(flat).text;

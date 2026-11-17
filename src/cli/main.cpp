@@ -16,6 +16,7 @@
 
 #include "core/document.h"
 #include "core/ocr.h"
+#include "core/ocrcost.h"
 #include "core/ocrdiagnostics.h"
 #include "core/ocrqueue.h"
 
@@ -375,9 +376,10 @@ int main(int argc, char *argv[])
         seconds += entry.result.elapsedMs / 1000.0;
     }
 
+    const ocrcost::Estimate cost = ocrcost::actual(doc);
     out() << "识别完成：" << success << "/" << pages.size() << " 页 · " << tokens
-          << " tokens · " << QString::number(seconds, 'f', 1) << "s · ≈¥"
-          << QString::number(success * 0.0015, 'f', 4) << "\n";
+          << " tokens · " << QString::number(seconds, 'f', 1) << "s · OCR 页费≈¥"
+          << ocrcost::formatCny(cost.total) << "\n";
     if (failed > 0 || emptyResults > 0) {
         out() << "其中 " << failed << " 页失败、" << emptyResults << " 页空结果\n";
     }

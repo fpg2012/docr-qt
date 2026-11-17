@@ -179,12 +179,14 @@ void OcrQueue::handleResult(int page, int generation, const ocr::PageResult &res
     const bool rich = result.purpose == QStringLiteral("rich_layout_recognition");
     const bool empty = result.ok() && rich && result.blocks.isEmpty()
                        && !ocr::hasText(result.payload);
-    const bool hasInk = pageHasInk(m_doc->ensureImage(page));
+    // 只有空结果才需要判断页面是否有墨迹；正常页不必再做一次缩图扫描。
+    const bool hasInk = empty && pageHasInk(m_doc->ensureImage(page));
 
     // 页面有内容但服务端返回空结果：自动重试一次。
     if (empty && !m_emptyRetries.contains(page) && hasInk) {
         m_emptyRetries.insert(page);
         m_doc->page(page).result = ocr::PageResult();
+        m_doc->releaseImage(page);
         emit pageRetrying(page);
         m_pending.enqueue(page);
         schedulePump();
@@ -192,6 +194,9 @@ void OcrQueue::handleResult(int page, int generation, const ocr::PageResult &res
     }
 
     m_doc->page(page).result = result;
+    // 识别完的整页图不再常驻；连续视图需要时会从 PDF 重新渲染。
+    // 否则批量识别 500 页会把所有整页位图都留在内存里。
+    m_doc->releaseImage(page);
     emit pageFinished(page, result);
     schedulePump();
 }

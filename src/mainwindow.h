@@ -38,6 +38,7 @@ public:
     void startOcrAll();
     void startOcrCurrent();
     void stopOcr();
+    void showOcrEstimate();
     void injectMockResult(const QString &jsonPath);
     // 调试入口：选中当前页的若干版面块。
     void selectBlocks(const QVector<int> &blocks);
@@ -82,6 +83,7 @@ private:
     void onPageRetrying(int page);
     void onPageFinished(int page, const ocr::PageResult &result);
     void ensureThumbs();
+    void scheduleThumbs();
     void rebuildOutline();
     void appendOutlineItems(QTreeWidgetItem *parent, const QVector<OutlineEntry> &entries);
     void generateOutlineFromToc();
@@ -135,6 +137,7 @@ private:
     struct TocJob {
         bool active = false;
         QVector<int> pages;
+        QString mode = QStringLiteral("agent");
     } m_tocJob;
 
     QSet<int> m_retriedPages;

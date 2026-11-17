@@ -5,6 +5,8 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QEventLoop>
 #include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -26,6 +28,7 @@
 #include <QPixmap>
 #include <QProgressBar>
 #include <QProgressDialog>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -49,9 +52,12 @@
 #include <QPalette>
 
 #include "blockcards.h"
+#include "costdialog.h"
 #include "core/exporters.h"
 #include "core/ocrdiagnostics.h"
+#include "core/ocrcost.h"
 #include "core/pdfexport.h"
+#include "core/tocagent.h"
 #include "pageview.h"
 #include "preferences.h"
 #include "theme.h"
@@ -144,7 +150,7 @@ MainWindow::MainWindow(QWidget *parent)
     updateStats();
 
     m_thumbTimer = new QTimer(this);
-    m_thumbTimer->setInterval(15);
+    m_thumbTimer->setInterval(8);
     connect(m_thumbTimer, &QTimer::timeout, this, &MainWindow::ensureThumbs);
 
     connect(&m_queue, &OcrQueue::pageQueued, this, &MainWindow::onPageQueued);
@@ -205,9 +211,15 @@ void MainWindow::buildUi()
     outlineLayout->addWidget(m_replaceOutline);
     m_tocButton = new QPushButton(QStringLiteral("从目录页生成…"), outlineTab);
     m_tocButton->setToolTip(
-        QStringLiteral("OCR 目录页，解析「标题 + 页码」，再映射到 PDF 实际页"));
+        QStringLiteral("OCR 目录页，用 deepseek-flash 整理成多级目录，再映射到 PDF 实际页"));
     outlineLayout->addWidget(m_tocButton);
     m_leftTabs->addTab(outlineTab, QStringLiteral("大纲"));
+    connect(m_leftTabs, &QTabWidget::currentChanged, this, [this](int) {
+        if (m_leftTabs->currentWidget() == m_pageList)
+            scheduleThumbs();
+        else if (m_thumbTimer)
+            m_thumbTimer->stop();
+    });
 
     leftDock->setWidget(m_leftTabs);
     leftDock->setMinimumWidth(200);
@@ -240,6 +252,8 @@ void MainWindow::buildUi()
 
     // 状态栏
     m_statsLabel = new QLabel(QStringLiteral("就绪"), this);
+    m_statsLabel->setToolTip(
+        QStringLiteral("OCR 按页费计费（1.5 元/千页）；tokens 仅统计用量，不参与 OCR 计费。"));
     m_progress = new QProgressBar(this);
     m_progress->setMaximumWidth(180);
     m_progress->setVisible(false);
@@ -266,6 +280,8 @@ void MainWindow::buildUi()
         QSettings().setValue(QStringLiteral("replaceOutlineWithOcr"), on);
         rebuildOutline();
     });
+    connect(m_pageList->verticalScrollBar(), &QScrollBar::valueChanged, this,
+            &MainWindow::scheduleThumbs);
     connect(m_pageList, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0 || m_syncingPage)
             return;
@@ -488,6 +504,9 @@ void MainWindow::buildActions()
     ocrMenu->addAction(ocrPage);
     ocrMenu->addAction(ocrAll);
     ocrMenu->addAction(stop);
+    ocrMenu->addSeparator();
+    ocrMenu->addAction(QStringLiteral("估算全部 OCR 费用…"), this,
+                       [this] { showOcrEstimate(); });
 
     auto *viewMenu = menuBar()->addMenu(QStringLiteral("视图"));
     viewMenu->addAction(prevPage);
@@ -676,6 +695,8 @@ void MainWindow::openDirectory()
 
 void MainWindow::addPagesToUi()
 {
+    m_thumbTimer->stop();
+    m_pageList->setUpdatesEnabled(false);
     m_pageList->clear();
     for (int i = 0; i < m_doc.count(); ++i) {
         auto *item = new QListWidgetItem(m_pageList);
@@ -684,11 +705,12 @@ void MainWindow::addPagesToUi()
         item->setTextAlignment(Qt::AlignHCenter);
         item->setSizeHint(QSize(140, 190));
     }
+    m_pageList->setUpdatesEnabled(true);
     m_view->setDocument(&m_doc, m_showBoxes);
-    m_thumbTimer->start();
     if (m_doc.count() > 0)
         m_pageList->setCurrentRow(0);
     updateStats();
+    scheduleThumbs();
 }
 
 void MainWindow::appendOutlineItems(QTreeWidgetItem *parent,
@@ -788,9 +810,19 @@ void MainWindow::generateOutlineFromToc()
     form->addRow(QStringLiteral("目录起始页"), start);
     form->addRow(QStringLiteral("目录结束页"), end);
     layout->addLayout(form);
+    auto *mode = new QComboBox(&dialog);
+    mode->addItem(QStringLiteral("AI 整理（deepseek-flash，适合多栏/多级目录）"),
+                  QStringLiteral("agent"));
+    mode->addItem(QStringLiteral("规则解析（离线，要求「标题 …… 页码」）"),
+                  QStringLiteral("rule"));
+    mode->setToolTip(QStringLiteral(
+        "AI 会读取这些页的 OCR 文本，整理成带层级的目录；会产生少量模型费用"));
+    form->addRow(QStringLiteral("解析方式"), mode);
+
     auto *hint = new QLabel(
-        QStringLiteral("会先识别这些页，再解析「标题 …… 页码」。\n"
-                       "已识别过的页直接复用，不会重复计费。"), &dialog);
+        QStringLiteral("会先识别这些页；AI 模式再把 OCR 文本交给 deepseek-flash "
+                       "整理成多级目录。已识别过的页直接复用，不会重复计费。"),
+        &dialog);
     hint->setWordWrap(true);
     hint->setForegroundRole(QPalette::PlaceholderText);
     layout->addWidget(hint);
@@ -801,6 +833,15 @@ void MainWindow::generateOutlineFromToc()
     layout->addWidget(buttons);
     if (dialog.exec() != QDialog::Accepted)
         return;
+
+    const QString tocMode = mode->currentData().toString();
+    if (tocMode == QStringLiteral("agent") && m_apiKey.trimmed().isEmpty()) {
+        QMessageBox::warning(
+            this, QStringLiteral("缺少 API Key"),
+            QStringLiteral("AI 目录需要 API Key。请先在首选项里填写，"
+                           "或把解析方式改成「规则解析」。"));
+        return;
+    }
 
     int from = start->value() - 1;
     int to = end->value() - 1;
@@ -817,6 +858,7 @@ void MainWindow::generateOutlineFromToc()
         return;
 
     m_tocJob.pages = pages;
+    m_tocJob.mode = tocMode;
     if (missing.isEmpty()) {
         m_tocJob.active = false;
         parseTocPages();
@@ -840,18 +882,24 @@ void MainWindow::parseTocPages()
     if (m_tocJob.pages.isEmpty())
         return;
     const QVector<int> pages = m_tocJob.pages;
+    const QString mode = m_tocJob.mode;
     m_tocJob.pages.clear();
     m_tocJob.active = false;
     m_tocButton->setEnabled(true);
     m_tocButton->setText(QStringLiteral("从目录页生成…"));
 
     QStringList lines;
+    QStringList sections;
     int usable = 0;
     for (int page : pages) {
         if (page < 0 || page >= m_doc.count() || !m_doc.page(page).result.ok())
             continue;
         ++usable;
-        lines += tocLinesFromResult(m_doc.page(page).result);
+        const QStringList pageLines = tocLinesFromResult(m_doc.page(page).result);
+        lines += pageLines;
+        sections << QStringLiteral("--- PDF 页 %1 ---\n%2")
+                        .arg(QString::number(page + 1),
+                             pageLines.join(QLatin1Char('\n')));
     }
     if (usable == 0) {
         QMessageBox::information(
@@ -859,11 +907,72 @@ void MainWindow::parseTocPages()
             QStringLiteral("这些页还没有可用的识别结果。请先识别目录页，或稍后重试。"));
         return;
     }
-    const QVector<toc::Entry> entries = toc::parseLines(lines);
+
+    QVector<toc::Entry> entries;
+    if (mode == QStringLiteral("agent")) {
+        if (m_apiKey.trimmed().isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("缺少 API Key"),
+                QStringLiteral("AI 目录需要 API Key。请先在首选项里填写，"
+                               "或把解析方式改成「规则解析」。"));
+            return;
+        }
+        toc::Agent agent;
+        QEventLoop loop;
+        QProgressDialog progress(QStringLiteral("正在用 deepseek-flash 整理目录…"),
+                                 QStringLiteral("取消"), 0, 0, this);
+        progress.setWindowTitle(QStringLiteral("生成目录"));
+        progress.setWindowModality(Qt::WindowModal);
+        progress.setMinimumDuration(0);
+        progress.setAutoClose(false);
+        progress.setAutoReset(false);
+
+        bool canceled = false;
+        QString agentError;
+        connect(&agent, &toc::Agent::finished, &loop,
+                [&](const QVector<toc::Entry> &result) {
+                    entries = result;
+                    loop.quit();
+                });
+        connect(&agent, &toc::Agent::failed, &loop, [&](const QString &error) {
+            agentError = error;
+            loop.quit();
+        });
+        connect(&progress, &QProgressDialog::canceled, &loop, [&] {
+            canceled = true;
+            agent.cancel();
+            loop.quit();
+        });
+
+        toc::AgentRequest request;
+        request.baseUrl = m_baseUrl;
+        request.apiKey = m_apiKey;
+        request.title = QFileInfo(m_doc.sourcePath()).fileName();
+        request.text = sections.join(QStringLiteral("\n\n"));
+        request.pageCount = m_doc.count();
+        QTimer::singleShot(0, &agent, [&] { agent.generate(request); });
+        progress.show();
+        loop.exec();
+        progress.close();
+
+        if (canceled) {
+            statusBar()->showMessage(QStringLiteral("已取消生成目录"), 3000);
+            return;
+        }
+        if (!agentError.isEmpty()) {
+            QMessageBox::warning(
+                this, QStringLiteral("AI 目录生成失败"),
+                QStringLiteral("%1\n\n可以把解析方式改成「规则解析」再试。").arg(agentError));
+            return;
+        }
+    } else {
+        entries = toc::parseLines(lines);
+    }
+
     if (entries.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("没解析出目录"),
-            QStringLiteral("识别结果里没有找到「标题 …… 页码」格式的条目。\n"
+            QStringLiteral("识别结果里没有找到可用的目录条目。\n"
                            "可以检查目录页是否识别正确，或换几页试试。"));
         return;
     }
@@ -934,7 +1043,8 @@ bool MainWindow::previewToc(const QVector<toc::Entry> &entries, int guessedOffse
     dialog.resize(760, 560);
     auto *layout = new QVBoxLayout(&dialog);
     auto *summary = new QLabel(
-        QStringLiteral("解析到 %1 条目录项。勾选需要的条目；取消勾选可丢弃误识别项。")
+        QStringLiteral("解析到 %1 条目录项。勾选需要的条目；没有页码的组标题会保留为"
+                       "不可跳转的层级节点。")
             .arg(entries.size()),
         &dialog);
     summary->setWordWrap(true);
@@ -1003,23 +1113,27 @@ bool MainWindow::previewToc(const QVector<toc::Entry> &entries, int guessedOffse
         QVector<OutlineEntry> roots;
         QVector<QPair<int, QVector<int>>> stack;
         int skipped = 0;
+        int withPage = 0;
         for (int i = 0; i < tree->topLevelItemCount(); ++i) {
             QTreeWidgetItem *item = tree->topLevelItem(i);
             if (item->checkState(0) != Qt::Checked)
                 continue;
             const int page = item->data(0, Qt::UserRole + 2).toInt();
-            if (page < 0 || page >= m_doc.count()) {
+            if (page >= m_doc.count()) {
                 ++skipped;
                 continue;
             }
             OutlineEntry node;
             node.title = item->text(0).trimmed();
-            node.page = page;
+            // -1 的组标题仍然保留，作为不可跳转的层级节点；子项可以正常跳转。
+            node.page = page >= 0 ? page : -1;
+            if (node.page >= 0)
+                ++withPage;
             appendOutlineNode(roots, stack, node, item->data(0, Qt::UserRole).toInt());
         }
-        if (roots.isEmpty()) {
+        if (roots.isEmpty() || withPage == 0) {
             QMessageBox::warning(&dialog, QStringLiteral("没有可用的条目"),
-                                 QStringLiteral("请至少勾选一条，并让 PDF 页码落在文档范围内。"));
+                                 QStringLiteral("请至少勾选一条带有效 PDF 页码的目录项。"));
             continue;
         }
         if (skipped > 0)
@@ -1031,15 +1145,45 @@ bool MainWindow::previewToc(const QVector<toc::Entry> &entries, int guessedOffse
     return false;
 }
 
+void MainWindow::scheduleThumbs()
+{
+    if (!m_thumbTimer || m_doc.count() == 0)
+        return;
+    if (m_leftTabs && m_leftTabs->currentWidget() != m_pageList)
+        return;
+    if (!m_thumbTimer->isActive())
+        m_thumbTimer->start();
+}
+
 void MainWindow::ensureThumbs()
 {
+    if (!m_pageList || m_doc.count() == 0 || !m_pageList->isVisible()) {
+        m_thumbTimer->stop();
+        return;
+    }
+
+    // 只生成当前可见页的缩略图。500 页文档如果打开时逐页渲染，会把主线程
+    // 卡住几十秒；滚动到哪里再渲染，打开和滚动都保持响应。
+    const QRect viewportRect = m_pageList->viewport()->rect();
+    QElapsedTimer budget;
+    budget.start();
+    int generated = 0;
     for (int i = 0; i < m_doc.count(); ++i) {
-        if (m_doc.page(i).thumb.isNull()) {
-            const QImage thumb = m_doc.ensureThumb(i);
-            if (auto *item = m_pageList->item(i))
-                item->setIcon(QIcon(QPixmap::fromImage(thumb)));
-            return; // 一次一张，保持界面响应
-        }
+        if (!m_doc.page(i).thumb.isNull())
+            continue;
+        QListWidgetItem *item = m_pageList->item(i);
+        if (!item)
+            continue;
+        const QRect rect = m_pageList->visualItemRect(item);
+        if (!rect.intersects(viewportRect))
+            continue;
+
+        const QImage thumb = m_doc.ensureThumb(i);
+        if (!thumb.isNull())
+            item->setIcon(QIcon(QPixmap::fromImage(thumb)));
+        ++generated;
+        if (generated >= 2 || budget.elapsed() > 24)
+            return;
     }
     m_thumbTimer->stop();
 }
@@ -1059,6 +1203,7 @@ void MainWindow::goToPage(int index)
         return;
     index = qBound(0, index, m_doc.count() - 1);
     m_view->setCurrentPage(index);
+    scheduleThumbs();
     if (auto *item = m_pageList->item(index))
         m_pageList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
 }
@@ -1159,14 +1304,14 @@ void MainWindow::updateStats()
             ++failed;
         }
     }
-    const double cost = done * 0.0015;
+    const double cost = ocrcost::actual(m_doc).total;
     QString text = m_doc.count() == 0
                        ? QStringLiteral("就绪")
-                       : QStringLiteral("%1/%2 页 · %3s · %4 tokens · ≈¥%5")
+                       : QStringLiteral("%1/%2 页 · %3s · %4 tokens · 页费≈¥%5")
                              .arg(done).arg(m_doc.count())
                              .arg(seconds, 0, 'f', 1)
                              .arg(tokens)
-                             .arg(cost, 0, 'f', 4);
+                             .arg(ocrcost::formatCny(cost));
     if (failed > 0)
         text += QStringLiteral(" · %1 页失败").arg(failed);
     if (emptyPages > 0)
@@ -1183,6 +1328,18 @@ void MainWindow::updateStats()
         m_progress->setRange(0, qMax(1, m_doc.count()));
         m_progress->setValue(done);
     }
+}
+
+void MainWindow::showOcrEstimate()
+{
+    if (m_doc.count() == 0) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
+        return;
+    }
+    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose);
+    CostDialog dialog(estimate, m_purpose, this);
+    if (dialog.exec() == QDialog::Accepted && dialog.startRequested())
+        startOcrAll();
 }
 
 void MainWindow::startOcrAll()
@@ -1209,7 +1366,12 @@ void MainWindow::startOcrAll()
         return;
     }
     m_retriedPages.clear();
-    statusBar()->showMessage(QStringLiteral("开始识别 %1 页…").arg(count), 3000);
+    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose);
+    statusBar()->showMessage(
+        QStringLiteral("开始识别 %1 页 · 预计 ≈¥%2（OCR 页费）")
+            .arg(count)
+            .arg(ocrcost::formatCny(estimate.pageFee)),
+        5000);
     updateStats();
 }
 

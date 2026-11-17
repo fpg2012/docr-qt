@@ -205,11 +205,17 @@ QImage Document::ensureThumb(int index)
         return entry.thumb;
 
     // 缩略图单独走低分辨率路径，不复用整页缓存：打开大文档时不会因为侧栏缩略图
-    // 把每一页都按 150 dpi 渲染、常驻内存。
+    // 把每一页都按 150 dpi 渲染、常驻内存。PDF 按最终高度的 2 倍渲染，既能
+    // 保证 180px 缩略图清晰，又不会为一张小图解码整页 72/150 dpi。
     if (entry.pdf) {
         std::unique_ptr<Poppler::Page> page(entry.pdf->page(entry.pdfPage));
         if (page) {
-            const QImage image = page->renderToImage(72, 72);
+            QSizeF points = entry.pdfSize;
+            if (points.isEmpty())
+                points = page->pageSizeF();
+            double dpi = 72.0 * 360.0 / qMax<qreal>(1.0, points.height());
+            dpi = qBound(18.0, dpi, 72.0);
+            const QImage image = page->renderToImage(dpi, dpi);
             if (!image.isNull())
                 entry.thumb = image.scaledToHeight(180, Qt::SmoothTransformation);
             return entry.thumb;
@@ -221,8 +227,8 @@ QImage Document::ensureThumb(int index)
         QImageReader reader(entry.sourcePath);
         const QSize size = reader.size();
         if (size.isValid() && size.height() > 0) {
-            const int width = qMax(1, qRound(size.width() * 180.0 / size.height()));
-            reader.setScaledSize(QSize(width, 180));
+            const int width = qMax(1, qRound(size.width() * 360.0 / size.height()));
+            reader.setScaledSize(QSize(width, 360));
         }
         const QImage image = reader.read();
         if (!image.isNull()) {

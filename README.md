@@ -3,10 +3,15 @@
 `docr-qt` 是 DeepSeek OCR 的 Qt 6 桌面客户端，支持 PDF、图片和图片目录。程序逐页调用
 `POST /v1/tools/ocr`，把返回的 `<|ref|>/<|box|>` 版面坐标叠加到页面上，并将结果整理为
 可筛选、复制和导出的版面块卡片。界面提供连续翻页、PDF 内置大纲、从目录页 OCR 生成大纲、
-框选以及跨块跨页的字符级文本选择。图片块可以直接复制，右键还能导出为 PNG。
+框选以及跨块跨页的字符级文本选择。连续视图只渲染视口附近的页面，缩略图也在进入可见区时
+才生成；批量识别时每页结果增量并入视图，打开和滚动 500 页以上的 PDF 不会一次性渲染全本。
+目录页既可以按「标题 …… 页码」规则解析，也可以交给 `deepseek-flash` 整理成适合多栏、
+分组标题和多级篇目的目录。图片块可以直接复制，右键还能导出为 PNG。
 
 识别结果可以导出 Markdown / JSON，也可以生成保留原页面、带不可见 OCR 文本层和当前大纲的
-可搜索 PDF。同一套核心还提供 `docr-cli`，可以在无界面环境中批量识别并导出 JSON / 文本 /
+可搜索 PDF。批量识别前可以用「识别 → 估算全部 OCR 费用…」按 OCR API 的页费
+（1.5 元/千页）估算总费用；OCR 不按 `deepseek-flash` 的 token 计费，目录 AI 整理才按
+token 另计。同一套核心还提供 `docr-cli`，可以在无界面环境中批量识别并导出 JSON / 文本 /
 Markdown。
 
 ## 快速开始
@@ -96,6 +101,10 @@ Windows（在同一个 UCRT64 shell 中）：
 PDF。单个 PDF 会通过 `pindf-append` 走真正的增量更新：原文件字节保持不变，只在末尾追加
 新对象、xref 和 trailer。图片、多个 PDF 混排或带 `/Rotate` 的页面会回退到 qpdf 完整重建。
 
+目录页识别后，在「大纲」页点「从目录页生成…」，默认使用 `deepseek-flash` 把 OCR 文本整理成
+多级目录；如果目录格式非常固定，也可以切换到离线规则解析。AI 调用会消耗少量 token，
+「估算全部 OCR 费用」目前不包含这部分目录调用。
+
 Windows 下把命令中的 `docr-cli` 换成 `docr-cli.exe`。在 UCRT64 shell 中运行时会自动找到
 Qt 和 poppler 的 DLL；若要脱离 MSYS2 分发，需要将相关 DLL 与 exe 放在一起，可先用
 `windeployqt` 复制 Qt 依赖。
@@ -121,11 +130,14 @@ src/
 │   ├── ocrqueue.*         # 并发队列、取消、空结果重试
 │   ├── exporters.*        # Markdown / JSON 导出
 │   ├── pdfexport.*        # 可搜索 PDF：文本层、增量写入与 qpdf fallback
+│   ├── ocrcost.*          # OCR 页费估算
 │   ├── unicodenormalize.* # PDF 文本层的 CJK 字符归一化
 │   ├── ocrdiagnostics.*   # 空结果诊断落盘
-│   └── tocparser.*        # 从 OCR 目录页解析标题与页码
+│   ├── tocparser.*        # 从 OCR 目录页解析标题与页码（规则模式）
+│   └── tocagent.*         # deepseek-flash 目录结构化（多栏 / 多级）
 ├── pageview.*             # 连续页面、识别框、框选、跨页文本选择
 ├── blockcards.*           # 版面块卡片列表与图片裁剪
+├── costdialog.*           # 全部 OCR 费用估算对话框
 ├── preferences.*          # 首选项与关于对话框
 ├── theme.*                # QPalette 派生颜色、SVG 图标染色
 ├── mainwindow.*           # 主窗口编排、大纲与状态同步

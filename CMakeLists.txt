@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt VERSION 0.6.0 LANGUAGES CXX)
+project(docr-qt VERSION 0.7.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,8 @@ add_library(docr-core STATIC
     src/core/exporters.cpp
     src/core/ocrdiagnostics.cpp
     src/core/tocparser.cpp
+    src/core/tocagent.cpp
+    src/core/ocrcost.cpp
     src/core/pdfexport.cpp
     src/core/unicodenormalize.cpp
 )
@@ -63,6 +65,7 @@ add_executable(docr-qt
     src/pageview.cpp
     src/blockcards.cpp
     src/preferences.cpp
+    src/costdialog.cpp
     src/mainwindow.cpp
     resources.qrc
 )
