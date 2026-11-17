@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt VERSION 0.7.0 LANGUAGES CXX)
+project(docr-qt VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Widgets)
 find_package(qpdf REQUIRED)
+find_package(yaml-cpp REQUIRED)
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
@@ -21,7 +22,7 @@ add_library(docr-core STATIC
     src/core/exporters.cpp
     src/core/ocrdiagnostics.cpp
     src/core/tocparser.cpp
-    src/core/tocagent.cpp
+    src/core/outlineio.cpp
     src/core/ocrcost.cpp
     src/core/pdfexport.cpp
     src/core/unicodenormalize.cpp
@@ -34,6 +35,7 @@ target_link_libraries(docr-core PUBLIC
     Qt6::Network
     PkgConfig::POPPLER_QT6
     qpdf::libqpdf
+    yaml-cpp::yaml-cpp
 )
 
 # pindf 增量写入 helper（Rust）。产物与 docr-qt 放在同一目录，便于运行时查找。

@@ -15,14 +15,16 @@ struct Estimate {
     double pageFee = 0.0;  // 待识别页的 OCR 页费
     double total = 0.0;    // doneFee + pageFee
     QString purpose;
+    bool billable = true;  // 本地 GLM-OCR 为 false
 };
 
 QString formatCny(double value);
 
 // 估算尚未识别的页面的 OCR 页费。
-Estimate estimateRemaining(const Document &doc, const QString &purpose);
+Estimate estimateRemaining(const Document &doc, const QString &purpose,
+                           bool billable = true);
 
 // 当前文档已经识别页面对应的 OCR 页费。
-Estimate actual(const Document &doc);
+Estimate actual(const Document &doc, bool billable = true);
 
 } // namespace ocrcost

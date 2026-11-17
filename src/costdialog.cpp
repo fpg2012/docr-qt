@@ -27,7 +27,11 @@ CostDialog::CostDialog(const ocrcost::Estimate &estimate, const QString &purpose
                        .arg(estimate.remainingPages)
                        .arg(mode);
 
-    if (estimate.remainingPages == 0) {
+    if (!estimate.billable) {
+        body += QStringLiteral(
+            "<p>当前使用本地 <b>GLM-OCR（vLLM）</b>，不产生 DeepSeek OCR API 页费。"
+            "本地推理的 GPU/电费由部署方承担，这里不计入。</p>");
+    } else if (estimate.remainingPages == 0) {
         body += QStringLiteral("<p>所有页面都已识别，没有待估算的页。"
                                "已产生 OCR 页费约 <b>¥%1</b>。</p>")
                     .arg(ocrcost::formatCny(estimate.total));
@@ -61,9 +65,11 @@ CostDialog::CostDialog(const ocrcost::Estimate &estimate, const QString &purpose
     layout->addWidget(details);
 
     auto *note = new QLabel(
-        QStringLiteral("只估算 OCR API 的页费；目录 AI 整理按 deepseek-flash 的 token "
-                       "另行计费，不包含在这里。识别失败通常不计页费，重新识别会再次计费。"
-                       "最终以 DeepSeek 账单为准。"),
+        estimate.billable
+            ? QStringLiteral("只估算 OCR API 的页费。识别失败通常不计页费，重新识别会再次计费。"
+                             "最终以 DeepSeek 账单为准。")
+            : QStringLiteral("本地 GLM-OCR 不产生 OCR API 页费；"
+                             "实际成本取决于本机推理资源。"),
         this);
     note->setWordWrap(true);
     note->setForegroundRole(QPalette::PlaceholderText);

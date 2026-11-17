@@ -15,6 +15,10 @@ struct Preferences {
     int dpi = 150;
     int concurrency = 3;
     QString purpose = QStringLiteral("rich_layout_recognition");
+    QString backend = QStringLiteral("deepseek");
+    QString glmEndpoint = QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
+    QString glmModel = QStringLiteral("glm-ocr");
+    QString glmApiKey;
     bool rememberKey = false;
 };
 
@@ -28,7 +32,11 @@ public:
 private:
     QLineEdit *m_keyEdit = nullptr;
     QLineEdit *m_baseEdit = nullptr;
+    QComboBox *m_backendCombo = nullptr;
     QComboBox *m_purposeCombo = nullptr;
+    QLineEdit *m_glmEndpointEdit = nullptr;
+    QLineEdit *m_glmModelEdit = nullptr;
+    QLineEdit *m_glmKeyEdit = nullptr;
     QSpinBox *m_dpiSpin = nullptr;
     QSpinBox *m_concSpin = nullptr;
     QCheckBox *m_remember = nullptr;

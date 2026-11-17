@@ -74,6 +74,13 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
     // —— 识别 ——
     auto *ocrPage = new QWidget(tabs);
     auto *ocrForm = new QFormLayout(ocrPage);
+    m_backendCombo = new QComboBox(ocrPage);
+    m_backendCombo->addItem(QStringLiteral("DeepSeek OCR API"), QStringLiteral("deepseek"));
+    m_backendCombo->addItem(QStringLiteral("GLM-OCR（本地 vLLM）"), QStringLiteral("glmocr"));
+    const int backendIndex = m_backendCombo->findData(initial.backend);
+    if (backendIndex >= 0)
+        m_backendCombo->setCurrentIndex(backendIndex);
+
     m_purposeCombo = new QComboBox(ocrPage);
     m_purposeCombo->addItem(QStringLiteral("版面分析（带坐标框）"),
                             QStringLiteral("rich_layout_recognition"));
@@ -98,10 +105,43 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
     ocrHint->setWordWrap(true);
     ocrHint->setForegroundRole(QPalette::PlaceholderText);
 
-    ocrForm->addRow(QStringLiteral("识别模式"), m_purposeCombo);
+    m_glmEndpointEdit = new QLineEdit(initial.glmEndpoint, ocrPage);
+    m_glmEndpointEdit->setPlaceholderText(
+        QStringLiteral("http://127.0.0.1:8080/v1/chat/completions"));
+    m_glmModelEdit = new QLineEdit(initial.glmModel, ocrPage);
+    m_glmModelEdit->setPlaceholderText(QStringLiteral("glm-ocr"));
+    m_glmKeyEdit = new QLineEdit(initial.glmApiKey, ocrPage);
+    m_glmKeyEdit->setEchoMode(QLineEdit::Password);
+    m_glmKeyEdit->setPlaceholderText(QStringLiteral("本地服务通常留空"));
+
+    auto *backendHint = new QLabel(
+        QStringLiteral("GLM-OCR 走本地 OpenAI 兼容 /v1/chat/completions；"
+                       "返回纯文本时整页作为一个文本块，不产生 DeepSeek OCR 页费。"),
+        ocrPage);
+    backendHint->setWordWrap(true);
+    backendHint->setForegroundRole(QPalette::PlaceholderText);
+
+    ocrForm->addRow(QStringLiteral("识别后端"), m_backendCombo);
+    ocrForm->addRow(QStringLiteral("DeepSeek 模式"), m_purposeCombo);
     ocrForm->addRow(QStringLiteral("渲染精度"), m_dpiSpin);
     ocrForm->addRow(QStringLiteral("并发数"), m_concSpin);
+    ocrForm->addRow(QStringLiteral("GLM 服务地址"), m_glmEndpointEdit);
+    ocrForm->addRow(QStringLiteral("GLM 模型"), m_glmModelEdit);
+    ocrForm->addRow(QStringLiteral("GLM API Key"), m_glmKeyEdit);
+    ocrForm->addRow(QString(), backendHint);
     ocrForm->addRow(QString(), ocrHint);
+
+    auto updateBackendFields = [this] {
+        const bool glm = m_backendCombo->currentData().toString()
+                         == QStringLiteral("glmocr");
+        m_purposeCombo->setEnabled(!glm);
+        m_glmEndpointEdit->setEnabled(glm);
+        m_glmModelEdit->setEnabled(glm);
+        m_glmKeyEdit->setEnabled(glm);
+    };
+    connect(m_backendCombo, &QComboBox::currentIndexChanged, this,
+            [updateBackendFields](int) { updateBackendFields(); });
+    updateBackendFields();
 
     tabs->addTab(apiPage, QStringLiteral("API"));
     tabs->addTab(ocrPage, QStringLiteral("识别"));
@@ -113,9 +153,13 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
         m_keyEdit->clear();
         m_remember->setChecked(false);
         m_baseEdit->setText(QStringLiteral("https://api.deepseek.com/v1/tools"));
+        m_backendCombo->setCurrentIndex(0);
         m_purposeCombo->setCurrentIndex(0);
         m_dpiSpin->setValue(150);
         m_concSpin->setValue(3);
+        m_glmEndpointEdit->setText(QStringLiteral("http://127.0.0.1:8080/v1/chat/completions"));
+        m_glmModelEdit->setText(QStringLiteral("glm-ocr"));
+        m_glmKeyEdit->clear();
     });
     layout->addWidget(buttons);
     adjustSize();
@@ -132,6 +176,14 @@ Preferences PreferencesDialog::values() const
     if (result.baseUrl.isEmpty())
         result.baseUrl = QStringLiteral("https://api.deepseek.com/v1/tools");
     result.purpose = m_purposeCombo->currentData().toString();
+    result.backend = m_backendCombo->currentData().toString();
+    result.glmEndpoint = m_glmEndpointEdit->text().trimmed();
+    if (result.glmEndpoint.isEmpty())
+        result.glmEndpoint = QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
+    result.glmModel = m_glmModelEdit->text().trimmed();
+    if (result.glmModel.isEmpty())
+        result.glmModel = QStringLiteral("glm-ocr");
+    result.glmApiKey = m_glmKeyEdit->text();
     result.dpi = m_dpiSpin->value();
     result.concurrency = m_concSpin->value();
     result.rememberKey = m_remember->isChecked();
@@ -149,7 +201,8 @@ void showAboutDialog(const QString &baseUrl, const QString &purpose, QWidget *pa
                     "<p>DeepSeek OCR 的 Qt 6 桌面客户端。<br>"
                     "拖入 PDF / 图片，逐页识别并把版面框叠加在页面上；"
                     "结果可复制文本/图片，导出 Markdown / JSON / 可搜索 PDF。<br>"
-                    "目录页可由 deepseek-flash 整理成多级大纲；批量识别前可估算 OCR 页费。</p>"
+                    "支持 DeepSeek OCR 与本地 GLM-OCR，可导入 JSON/YAML 大纲；"
+                    "批量识别前可估算 OCR 页费。</p>"
                     "<p><b>Qt</b> %2<br>"
                     "<b>接口</b> %3<br>"
                     "<b>识别模式</b> %4</p>"

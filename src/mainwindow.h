@@ -33,12 +33,15 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
     bool loadPath(const QString &path);
+    // 导入 pdf-outline 兼容的 JSON/YAML，替换当前大纲。
+    bool importOutlineFile(const QString &path);
     // 打开一组路径（PDF / 图片 / 图片目录，可混合），替换当前文档。
     void openPaths(const QStringList &paths);
     void startOcrAll();
     void startOcrCurrent();
     void stopOcr();
     void showOcrEstimate();
+    void retryFailedPages();
     void injectMockResult(const QString &jsonPath);
     // 调试入口：选中当前页的若干版面块。
     void selectBlocks(const QVector<int> &blocks);
@@ -76,6 +79,8 @@ private:
     void updatePageNav();
     void updatePanels();
     void updateStats();
+    QVector<int> retryCandidates() const;
+    void updateRetryButton(int count);
     void refreshPageList(int index);
 
     void onPageQueued(int page);
@@ -88,6 +93,7 @@ private:
     void appendOutlineItems(QTreeWidgetItem *parent, const QVector<OutlineEntry> &entries);
     void generateOutlineFromToc();
     void parseTocPages();
+    void importOutline();
     bool previewToc(const QVector<toc::Entry> &entries, int guessedOffset,
                     QVector<OutlineEntry> *mapped);
 
@@ -113,6 +119,7 @@ private:
     QListWidget *m_pageList = nullptr;
     QTreeWidget *m_outlineTree = nullptr;
     QPushButton *m_tocButton = nullptr;
+    QPushButton *m_importOutlineButton = nullptr;
     QCheckBox *m_replaceOutline = nullptr;
     PageView *m_view = nullptr;
     QPlainTextEdit *m_textView = nullptr;
@@ -124,6 +131,7 @@ private:
     QAction *m_stopAction = nullptr;
     QAction *m_textToolAction = nullptr;
     QLabel *m_statsLabel = nullptr;
+    QPushButton *m_retryButton = nullptr;
     QLabel *m_hintLabel = nullptr;
     QLabel *m_selLabel = nullptr;
     QProgressBar *m_progress = nullptr;
@@ -133,11 +141,11 @@ private:
     bool m_applyingTheme = false;
     void applyTheme();
 
-    QVector<OutlineEntry> m_ocrOutline;
+    QVector<OutlineEntry> m_customOutline;
+    QString m_customOutlineLabel = QStringLiteral("OCR 目录");
     struct TocJob {
         bool active = false;
         QVector<int> pages;
-        QString mode = QStringLiteral("agent");
     } m_tocJob;
 
     QSet<int> m_retriedPages;
@@ -146,6 +154,10 @@ private:
     QString m_apiKey;
     QString m_baseUrl;
     QString m_purpose = QStringLiteral("rich_layout_recognition");
+    QString m_ocrBackend = QStringLiteral("deepseek");
+    QString m_glmEndpoint = QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
+    QString m_glmModel = QStringLiteral("glm-ocr");
+    QString m_glmApiKey;
     bool m_showBoxes = true;
     bool m_batchMode = false;
     bool m_syncing = false;

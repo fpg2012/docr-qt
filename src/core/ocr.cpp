@@ -12,6 +12,7 @@
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QStandardPaths>
+#include <QTextDocument>
 #include <QTextDocumentFragment>
 #include <QUrl>
 
@@ -133,6 +134,22 @@ bool isImageKind(const QString &kind)
     return kind == QLatin1String("image") || kind == QLatin1String("figure");
 }
 
+bool isLayoutPurpose(const QString &purpose)
+{
+    return purpose == QLatin1String("rich_layout_recognition")
+           || purpose == QLatin1String("glmocr");
+}
+
+bool needsRetry(const PageResult &result)
+{
+    if (!result.error.isEmpty())
+        return true;
+    if (!result.ok())
+        return false;
+    return isLayoutPurpose(result.purpose) && result.blocks.isEmpty()
+           && !hasText(result.payload) && !result.blank;
+}
+
 QString kindLabel(const QString &kind)
 {
     if (kind == QLatin1String("title")) return QStringLiteral("标题");
@@ -225,6 +242,22 @@ QString dshApiKey()
     return match.hasMatch() ? match.captured(1) : QString();
 }
 
+QString defaultGlmEndpoint()
+{
+    return QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
+}
+
+Backend backendFromString(const QString &name)
+{
+    return name.compare(QStringLiteral("glmocr"), Qt::CaseInsensitive) == 0
+                   || name.compare(QStringLiteral("glm-ocr"), Qt::CaseInsensitive) == 0
+                   || name.compare(QStringLiteral("glm"), Qt::CaseInsensitive) == 0
+               ? Backend::GlmOcr
+               : Backend::DeepSeek;
+}
+
+
+
 Client::Client(QObject *parent)
     : QObject(parent)
 {
@@ -237,8 +270,41 @@ void Client::configure(const QString &baseUrl, const QString &apiKey)
     m_apiKey = apiKey;
 }
 
+void Client::configureGlm(const QString &endpoint, const QString &model,
+                          const QString &apiKey)
+{
+    QString url = endpoint.trimmed();
+    if (url.isEmpty())
+        url = defaultGlmEndpoint();
+    while (url.endsWith(QLatin1Char('/')))
+        url.chop(1);
+    if (url.endsWith(QStringLiteral("/v1")))
+        url += QStringLiteral("/chat/completions");
+    else if (!url.contains(QStringLiteral("/v1/chat/completions"))
+             && QUrl(url).path().isEmpty())
+        url += QStringLiteral("/v1/chat/completions");
+    m_glmEndpoint = url;
+    m_glmModel = model.trimmed().isEmpty() ? QStringLiteral("glm-ocr") : model.trimmed();
+    m_glmApiKey = apiKey;
+}
+
+void Client::setBackend(Backend backend)
+{
+    m_backend = backend;
+}
+
 void Client::submit(int page, int generation, const QByteArray &data,
                     const QString &filename, const QString &purpose)
+{
+    if (m_backend == Backend::GlmOcr) {
+        submitGlm(page, generation, data);
+        return;
+    }
+    submitDeepSeek(page, generation, data, filename, purpose);
+}
+
+void Client::submitDeepSeek(int page, int generation, const QByteArray &data,
+                            const QString &filename, const QString &purpose)
 {
     PageResult early;
     early.page = page;
@@ -284,6 +350,187 @@ void Client::submit(int page, int generation, const QByteArray &data,
                 handleReply(reply, page, generation, purpose, started);
                 reply->deleteLater();
             });
+}
+
+void Client::submitGlm(int page, int generation, const QByteArray &data)
+{
+    ocr::PageResult early;
+    early.page = page;
+    early.purpose = QStringLiteral("glmocr");
+    if (data.isEmpty()) {
+        early.error = QStringLiteral("页面内容为空");
+        emit finished(page, generation, early);
+        return;
+    }
+
+    const QString dataUri =
+        QStringLiteral("data:image/png;base64,") + QString::fromLatin1(data.toBase64());
+    QJsonArray content;
+    content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("image_url")},
+                               {QStringLiteral("image_url"),
+                                QJsonObject{{QStringLiteral("url"), dataUri}}}});
+    content.append(QJsonObject{{QStringLiteral("type"), QStringLiteral("text")},
+                               {QStringLiteral("text"), QStringLiteral("Text Recognition:")}});
+    QJsonObject message{{QStringLiteral("role"), QStringLiteral("user")},
+                        {QStringLiteral("content"), content}};
+
+    QJsonObject body;
+    body.insert(QStringLiteral("model"),
+                m_glmModel.isEmpty() ? QStringLiteral("glm-ocr") : m_glmModel);
+    body.insert(QStringLiteral("messages"), QJsonArray{message});
+    body.insert(QStringLiteral("max_tokens"), 8192);
+    body.insert(QStringLiteral("temperature"), 0);
+    body.insert(QStringLiteral("top_p"), 0.00001);
+    body.insert(QStringLiteral("top_k"), 1);
+    body.insert(QStringLiteral("repetition_penalty"), 1.1);
+    body.insert(QStringLiteral("stream"), false);
+
+    QNetworkRequest request(QUrl(m_glmEndpoint.isEmpty() ? defaultGlmEndpoint()
+                                                         : m_glmEndpoint));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    if (!m_glmApiKey.isEmpty())
+        request.setRawHeader("Authorization", "Bearer " + m_glmApiKey.toUtf8());
+    request.setTransferTimeout(300000);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+
+    const qint64 started = QDateTime::currentMSecsSinceEpoch();
+    QNetworkReply *reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, page, generation, started] {
+                handleGlmReply(reply, page, generation, started);
+                reply->deleteLater();
+            });
+}
+
+void Client::handleGlmReply(QNetworkReply *reply, int page, int generation,
+                            qint64 started)
+{
+    ocr::PageResult result;
+    result.page = page;
+    result.purpose = QStringLiteral("glmocr");
+    result.elapsedMs = QDateTime::currentMSecsSinceEpoch() - started;
+    const QByteArray raw = reply->readAll();
+    result.raw = raw;
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+    if (reply->error() != QNetworkReply::NoError && status == 0) {
+        result.error = QStringLiteral("GLM-OCR 网络错误：%1").arg(reply->errorString());
+        emit finished(page, generation, result);
+        return;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(raw, &parseError);
+    if (status != 200) {
+        QString detail;
+        if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+            const QJsonValue err = doc.object().value(QStringLiteral("error"));
+            detail = err.isObject() ? err.toObject().value(QStringLiteral("message")).toString()
+                                    : err.toString();
+        }
+        if (detail.isEmpty())
+            detail = QString::fromUtf8(raw.left(300));
+        result.error = QStringLiteral("GLM-OCR HTTP %1：%2").arg(status).arg(detail);
+        emit finished(page, generation, result);
+        return;
+    }
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        result.error = QStringLiteral("GLM-OCR 响应不是合法 JSON");
+        emit finished(page, generation, result);
+        return;
+    }
+
+    const QJsonObject root = doc.object();
+    const QJsonValue err = root.value(QStringLiteral("error"));
+    if (!err.isUndefined() && !err.isNull()) {
+        result.error = err.isObject()
+                           ? err.toObject().value(QStringLiteral("message")).toString(
+                                 QStringLiteral("GLM-OCR 识别失败"))
+                           : err.toString(QStringLiteral("GLM-OCR 识别失败"));
+        emit finished(page, generation, result);
+        return;
+    }
+
+    finishGlm(page, generation, root, raw, started);
+}
+
+void Client::finishGlm(int page, int generation, const QJsonObject &response,
+                       const QByteArray &raw, qint64 started)
+{
+    ocr::PageResult result;
+    result.page = page;
+    result.purpose = QStringLiteral("glmocr");
+    result.elapsedMs = QDateTime::currentMSecsSinceEpoch() - started;
+    result.raw = raw;
+
+    const QJsonArray choices = response.value(QStringLiteral("choices")).toArray();
+    if (choices.isEmpty()) {
+        result.error = QStringLiteral("GLM-OCR 响应缺少 choices");
+        emit finished(page, generation, result);
+        return;
+    }
+    const QJsonObject choice = choices.first().toObject();
+    const QJsonObject message = choice.value(QStringLiteral("message")).toObject();
+    QString content = message.value(QStringLiteral("content")).toString();
+    if (content.trimmed().isEmpty()) {
+        // 交给 OcrQueue 判断是空白页还是服务端空结果，后者会自动重试一次。
+        QJsonObject pageObject;
+        pageObject.insert(QStringLiteral("index"), 0);
+        pageObject.insert(QStringLiteral("text"), QString());
+        pageObject.insert(QStringLiteral("finish_reason"), QStringLiteral("stop"));
+        QJsonObject payload;
+        payload.insert(QStringLiteral("pages"), QJsonArray{pageObject});
+        payload.insert(QStringLiteral("usage"), response.value(QStringLiteral("usage")));
+        payload.insert(QStringLiteral("provider"), QStringLiteral("glmocr"));
+        result.payload = payload;
+        emit finished(page, generation, result);
+        return;
+    }
+
+    if (content.trimmed().startsWith(QStringLiteral("```"))) {
+        const QString trimmed = content.trimmed();
+        const int firstLine = trimmed.indexOf(QLatin1Char('\n'));
+        const int lastFence = trimmed.lastIndexOf(QStringLiteral("```"));
+        if (firstLine >= 0 && lastFence > firstLine)
+            content = trimmed.mid(firstLine + 1, lastFence - firstLine - 1);
+    }
+
+    QString plain;
+    {
+        QTextDocument markdown;
+        markdown.setMarkdown(content);
+        plain = markdown.toPlainText().trimmed();
+    }
+    if (plain.isEmpty() && content.contains(QStringLiteral("<table"), Qt::CaseInsensitive)) {
+        // Markdown 解析器不认某些 HTML 表格时，退回带全部可读文本的 HTML 处理。
+        plain = stripHtml(content).trimmed();
+        plain.replace(QLatin1Char('\t'), QStringLiteral(" | "));
+    }
+    if (plain.isEmpty()) {
+        result.error = QStringLiteral("GLM-OCR 没有可显示的文本");
+        emit finished(page, generation, result);
+        return;
+    }
+
+    ocr::Block block;
+    block.kind = QStringLiteral("text");
+    block.text = plain;
+    block.boxes.append(QRectF(20, 20, 960, 960));
+    result.blocks.append(block);
+
+    QJsonObject pageObject;
+    pageObject.insert(QStringLiteral("index"), 0);
+    pageObject.insert(QStringLiteral("text"), plain);
+    pageObject.insert(QStringLiteral("finish_reason"),
+                      choice.value(QStringLiteral("finish_reason")).toString(
+                          QStringLiteral("stop")));
+    QJsonObject payload;
+    payload.insert(QStringLiteral("pages"), QJsonArray{pageObject});
+    payload.insert(QStringLiteral("usage"), response.value(QStringLiteral("usage")));
+    payload.insert(QStringLiteral("provider"), QStringLiteral("glmocr"));
+    result.payload = payload;
+    emit finished(page, generation, result);
 }
 
 void Client::handleReply(QNetworkReply *reply, int page, int generation,

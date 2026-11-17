@@ -164,7 +164,7 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationVersion(QStringLiteral(DOCR_VERSION));
 
     QCommandLineParser parser;
-    parser.setApplicationDescription(QStringLiteral("DeepSeek OCR 命令行工具"));
+    parser.setApplicationDescription(QStringLiteral("DeepSeek / GLM-OCR 命令行工具"));
     parser.addHelpOption();
     parser.addVersionOption();
 
@@ -193,13 +193,29 @@ int main(int argc, char *argv[])
                                     QStringLiteral("key"));
     QCommandLineOption baseUrlOption(
         QStringLiteral("base-url"),
-        QStringLiteral("默认 https://api.deepseek.com/v1/tools"),
+        QStringLiteral("DeepSeek 接口地址"),
         QStringLiteral("url"), QStringLiteral("https://api.deepseek.com/v1/tools"));
+    QCommandLineOption backendOption(
+        QStringLiteral("backend"),
+        QStringLiteral("deepseek | glmocr（默认 deepseek）"),
+        QStringLiteral("name"), QStringLiteral("deepseek"));
+    QCommandLineOption glmUrlOption(
+        QStringLiteral("glm-url"),
+        QStringLiteral("GLM-OCR 的 OpenAI 兼容接口"),
+        QStringLiteral("url"),
+        QStringLiteral("http://127.0.0.1:8080/v1/chat/completions"));
+    QCommandLineOption glmModelOption(
+        QStringLiteral("glm-model"), QStringLiteral("GLM 模型名"),
+        QStringLiteral("name"), QStringLiteral("glm-ocr"));
+    QCommandLineOption glmKeyOption(
+        QStringLiteral("glm-key"), QStringLiteral("GLM API Key（本地通常留空）"),
+        QStringLiteral("key"));
     QCommandLineOption quietOption({QStringLiteral("q"), QStringLiteral("quiet")},
                                    QStringLiteral("不打印逐页进度"));
 
     parser.addOptions({outputOption, purposeOption, dpiOption, concOption, formatOption,
-                       pagesOption, apiKeyOption, baseUrlOption, quietOption});
+                       pagesOption, apiKeyOption, baseUrlOption, backendOption,
+                       glmUrlOption, glmModelOption, glmKeyOption, quietOption});
     parser.addPositionalArgument(QStringLiteral("input"),
                                  QStringLiteral("PDF / 图片 / 目录，可以多个"));
 
@@ -237,10 +253,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    const QString backendName = parser.value(backendOption).trimmed().toLower();
+    const ocr::Backend backend = ocr::backendFromString(backendName);
+    if (backendName != QStringLiteral("deepseek") && backendName != QStringLiteral("glmocr")
+        && backendName != QStringLiteral("glm")) {
+        err() << "未知后端：" << backendName << "（可用 deepseek / glmocr）\n";
+        return 1;
+    }
+
     QString apiKey = parser.value(apiKeyOption).trimmed();
     if (apiKey.isEmpty())
         apiKey = ocr::dshApiKey();
-    if (apiKey.isEmpty()) {
+    if (backend == ocr::Backend::DeepSeek && apiKey.isEmpty()) {
         err() << "缺少 API Key：用 --api-key、DEEPSEEK_API_KEY 或 ~/.dsh/.credentials.yaml\n";
         return 1;
     }
@@ -271,6 +295,9 @@ int main(int argc, char *argv[])
 
     OcrQueue queue(&doc);
     queue.configure(parser.value(baseUrlOption), apiKey, purpose, concurrency);
+    queue.configureGlm(parser.value(glmUrlOption), parser.value(glmModelOption),
+                       parser.value(glmKeyOption));
+    queue.setBackend(backend);
 
     int finished = 0;
     int failed = 0;
@@ -376,10 +403,15 @@ int main(int argc, char *argv[])
         seconds += entry.result.elapsedMs / 1000.0;
     }
 
-    const ocrcost::Estimate cost = ocrcost::actual(doc);
+    const bool billable = backend == ocr::Backend::DeepSeek;
+    const ocrcost::Estimate cost = ocrcost::actual(doc, billable);
     out() << "识别完成：" << success << "/" << pages.size() << " 页 · " << tokens
-          << " tokens · " << QString::number(seconds, 'f', 1) << "s · OCR 页费≈¥"
-          << ocrcost::formatCny(cost.total) << "\n";
+          << " tokens · " << QString::number(seconds, 'f', 1) << "s";
+    if (billable)
+        out() << " · OCR 页费≈¥" << ocrcost::formatCny(cost.total);
+    else
+        out() << " · 本地 GLM-OCR";
+    out() << "\n";
     if (failed > 0 || emptyResults > 0) {
         out() << "其中 " << failed << " 页失败、" << emptyResults << " 页空结果\n";
     }

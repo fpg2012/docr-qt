@@ -6,7 +6,6 @@
 #include <QComboBox>
 #include <QDir>
 #include <QElapsedTimer>
-#include <QEventLoop>
 #include <QDockWidget>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -57,7 +56,7 @@
 #include "core/ocrdiagnostics.h"
 #include "core/ocrcost.h"
 #include "core/pdfexport.h"
-#include "core/tocagent.h"
+#include "core/outlineio.h"
 #include "pageview.h"
 #include "preferences.h"
 #include "theme.h"
@@ -94,8 +93,7 @@ QStringList tocLinesFromResult(const ocr::PageResult &result)
     QStringList lines;
     if (!result.ok())
         return lines;
-    if (result.purpose == QStringLiteral("rich_layout_recognition")
-        && !result.blocks.isEmpty()) {
+    if (!result.blocks.isEmpty()) {
         for (const ocr::Block &block : result.blocks) {
             if (block.kind.contains(QStringLiteral("page_number"))
                 || block.kind == QLatin1String("header")
@@ -205,14 +203,18 @@ void MainWindow::buildUi()
     m_outlineTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_outlineTree->setToolTip(QStringLiteral("点击大纲条目跳转到对应页"));
     outlineLayout->addWidget(m_outlineTree, 1);
-    m_replaceOutline = new QCheckBox(QStringLiteral("用 OCR 目录替换内置大纲"), outlineTab);
+    m_replaceOutline = new QCheckBox(QStringLiteral("用自定义目录替换内置大纲"), outlineTab);
     m_replaceOutline->setToolTip(
-        QStringLiteral("只在同时存在内置书签和 OCR 目录时生效；勾选后隐藏内置书签"));
+        QStringLiteral("同时存在内置书签和 OCR/导入目录时生效；勾选后隐藏内置书签"));
     outlineLayout->addWidget(m_replaceOutline);
     m_tocButton = new QPushButton(QStringLiteral("从目录页生成…"), outlineTab);
     m_tocButton->setToolTip(
-        QStringLiteral("OCR 目录页，用 deepseek-flash 整理成多级目录，再映射到 PDF 实际页"));
+        QStringLiteral("OCR 目录页，解析「标题 + 页码」，再映射到 PDF 实际页"));
     outlineLayout->addWidget(m_tocButton);
+    m_importOutlineButton = new QPushButton(QStringLiteral("导入 JSON / YAML…"), outlineTab);
+    m_importOutlineButton->setToolTip(
+        QStringLiteral("导入 pdf-outline 兼容的 JSON/YAML，替换当前大纲"));
+    outlineLayout->addWidget(m_importOutlineButton);
     m_leftTabs->addTab(outlineTab, QStringLiteral("大纲"));
     connect(m_leftTabs, &QTabWidget::currentChanged, this, [this](int) {
         if (m_leftTabs->currentWidget() == m_pageList)
@@ -259,11 +261,15 @@ void MainWindow::buildUi()
     m_progress->setVisible(false);
     m_selLabel = new QLabel(this);
     m_selLabel->hide();
+    m_retryButton = new QPushButton(QStringLiteral("重试失败页"), this);
+    m_retryButton->setToolTip(QStringLiteral("重新识别失败或返回空结果的页面"));
+    m_retryButton->hide();
     m_hintLabel = new QLabel(
         QStringLiteral("拖入 PDF / 图片 / 文件夹 · Ctrl+滚轮缩放 · PgUp/PgDn 滚动"), this);
     m_hintLabel->setForegroundRole(QPalette::PlaceholderText);
     statusBar()->addWidget(m_statsLabel, 1);
     statusBar()->addPermanentWidget(m_selLabel);
+    statusBar()->addPermanentWidget(m_retryButton);
     statusBar()->addPermanentWidget(m_hintLabel);
     statusBar()->addPermanentWidget(m_progress);
 
@@ -276,6 +282,7 @@ void MainWindow::buildUi()
                     goToPage(page);
             });
     connect(m_tocButton, &QPushButton::clicked, this, &MainWindow::generateOutlineFromToc);
+    connect(m_importOutlineButton, &QPushButton::clicked, this, &MainWindow::importOutline);
     connect(m_replaceOutline, &QCheckBox::toggled, this, [this](bool on) {
         QSettings().setValue(QStringLiteral("replaceOutlineWithOcr"), on);
         rebuildOutline();
@@ -299,6 +306,7 @@ void MainWindow::buildUi()
         m_selLabel->setText(QStringLiteral("已选 %1 字 · 跨 %2 个块  ").arg(chars).arg(blocks));
         m_selLabel->show();
     });
+    connect(m_retryButton, &QPushButton::clicked, this, &MainWindow::retryFailedPages);
     connect(m_view, &PageView::textCopied, this, [this](int blocks, int chars) {
         statusBar()->showMessage(
             QStringLiteral("已复制 %1 个块 · %2 字").arg(blocks).arg(chars), 2500);
@@ -492,6 +500,9 @@ void MainWindow::buildActions()
     fileMenu->addAction(QStringLiteral("导出可搜索 PDF…"), this,
                         [this] { exportSearchablePdf(); });
     fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("导入大纲 JSON / YAML…"), this,
+                        [this] { importOutline(); });
+    fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
 
     auto *editMenu = menuBar()->addMenu(QStringLiteral("编辑"));
@@ -505,6 +516,8 @@ void MainWindow::buildActions()
     ocrMenu->addAction(ocrAll);
     ocrMenu->addAction(stop);
     ocrMenu->addSeparator();
+    ocrMenu->addAction(QStringLiteral("重试失败页"), this,
+                       [this] { retryFailedPages(); });
     ocrMenu->addAction(QStringLiteral("估算全部 OCR 费用…"), this,
                        [this] { showOcrEstimate(); });
 
@@ -538,8 +551,17 @@ void MainWindow::applySettings()
     m_concurrency = qBound(1, settings.value(QStringLiteral("concurrency"), 3).toInt(), 8);
     m_purpose = settings.value(QStringLiteral("purpose"),
                                QStringLiteral("rich_layout_recognition")).toString();
+    m_ocrBackend = settings.value(QStringLiteral("ocrBackend"),
+                                  QStringLiteral("deepseek")).toString();
+    m_glmEndpoint = settings.value(QStringLiteral("glmEndpoint"),
+                                   ocr::defaultGlmEndpoint()).toString();
+    m_glmModel = settings.value(QStringLiteral("glmModel"),
+                                QStringLiteral("glm-ocr")).toString();
+    m_glmApiKey = settings.value(QStringLiteral("glmApiKey")).toString();
     m_doc.setDpi(m_dpi);
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
+    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey);
+    m_queue.setBackend(ocr::backendFromString(m_ocrBackend));
     if (m_replaceOutline) {
         QSignalBlocker blocker(m_replaceOutline);
         m_replaceOutline->setChecked(
@@ -551,6 +573,15 @@ void MainWindow::applySettings()
             QSignalBlocker blocker(m_purposeBox);
             m_purposeBox->setCurrentIndex(index);
         }
+        const bool localGlm = ocr::backendFromString(m_ocrBackend) == ocr::Backend::GlmOcr;
+        if (m_statsLabel)
+            m_statsLabel->setToolTip(
+                localGlm ? QStringLiteral("本地 GLM-OCR：不产生 DeepSeek OCR 页费，tokens 仅统计用量。")
+                         : QStringLiteral("OCR 按页费计费（1.5 元/千页）；tokens 仅统计用量。"));
+        m_purposeBox->setEnabled(!localGlm);
+        m_purposeBox->setToolTip(
+            localGlm ? QStringLiteral("GLM-OCR 总是返回整页文本，不使用 DeepSeek 版面模式")
+                     : QStringLiteral("DeepSeek OCR 的识别模式"));
     }
     if (m_replaceOutline)
         rebuildOutline();
@@ -563,12 +594,23 @@ void MainWindow::saveSettings()
     settings.setValue(QStringLiteral("dpi"), m_dpi);
     settings.setValue(QStringLiteral("concurrency"), m_concurrency);
     settings.setValue(QStringLiteral("purpose"), m_purpose);
-    if (settings.value(QStringLiteral("rememberKey"), false).toBool())
+    settings.setValue(QStringLiteral("ocrBackend"), m_ocrBackend);
+    settings.setValue(QStringLiteral("glmEndpoint"), m_glmEndpoint);
+    settings.setValue(QStringLiteral("glmModel"), m_glmModel);
+    if (settings.value(QStringLiteral("rememberKey"), false).toBool()) {
         settings.setValue(QStringLiteral("apiKey"), m_apiKey);
+        if (!m_glmApiKey.isEmpty())
+            settings.setValue(QStringLiteral("glmApiKey"), m_glmApiKey);
+    } else {
+        settings.remove(QStringLiteral("apiKey"));
+        settings.remove(QStringLiteral("glmApiKey"));
+    }
     if (m_replaceOutline)
         settings.setValue(QStringLiteral("replaceOutlineWithOcr"),
                           m_replaceOutline->isChecked());
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
+    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey);
+    m_queue.setBackend(ocr::backendFromString(m_ocrBackend));
     m_doc.setDpi(m_dpi);
 }
 
@@ -580,6 +622,10 @@ void MainWindow::openPreferences()
     initial.dpi = m_dpi;
     initial.concurrency = m_concurrency;
     initial.purpose = m_purpose;
+    initial.backend = m_ocrBackend;
+    initial.glmEndpoint = m_glmEndpoint;
+    initial.glmModel = m_glmModel;
+    initial.glmApiKey = m_glmApiKey;
     initial.rememberKey = QSettings().value(QStringLiteral("rememberKey"), false).toBool();
 
     PreferencesDialog dialog(initial, this);
@@ -594,6 +640,10 @@ void MainWindow::openPreferences()
     m_dpi = values.dpi;
     m_concurrency = values.concurrency;
     m_purpose = values.purpose;
+    m_ocrBackend = values.backend;
+    m_glmEndpoint = values.glmEndpoint;
+    m_glmModel = values.glmModel;
+    m_glmApiKey = values.glmApiKey;
 
     QSettings settings;
     settings.setValue(QStringLiteral("rememberKey"), values.rememberKey);
@@ -609,7 +659,17 @@ void MainWindow::openPreferences()
             QSignalBlocker blocker(m_purposeBox);
             m_purposeBox->setCurrentIndex(index);
         }
+        const bool localGlm = ocr::backendFromString(m_ocrBackend) == ocr::Backend::GlmOcr;
+        if (m_statsLabel)
+            m_statsLabel->setToolTip(
+                localGlm ? QStringLiteral("本地 GLM-OCR：不产生 DeepSeek OCR 页费，tokens 仅统计用量。")
+                         : QStringLiteral("OCR 按页费计费（1.5 元/千页）；tokens 仅统计用量。"));
+        m_purposeBox->setEnabled(!localGlm);
+        m_purposeBox->setToolTip(
+            localGlm ? QStringLiteral("GLM-OCR 总是返回整页文本，不使用 DeepSeek 版面模式")
+                     : QStringLiteral("DeepSeek OCR 的识别模式"));
     }
+    updateStats();
     statusBar()->showMessage(QStringLiteral("首选项已保存"), 2500);
 }
 
@@ -648,7 +708,8 @@ void MainWindow::openPaths(const QStringList &paths)
                              report.errors.isEmpty()
                                  ? QStringLiteral("没有可显示的页面")
                                  : report.errors.join(QLatin1Char('\n')));
-        m_ocrOutline.clear();
+        m_customOutline.clear();
+        m_customOutlineLabel = QStringLiteral("OCR 目录");
         m_tocJob.active = false;
         m_tocJob.pages.clear();
         rebuildOutline();
@@ -660,7 +721,8 @@ void MainWindow::openPaths(const QStringList &paths)
     }
 
     addPagesToUi();
-    m_ocrOutline.clear();
+    m_customOutline.clear();
+    m_customOutlineLabel = QStringLiteral("OCR 目录");
     m_tocJob.active = false;
     m_tocJob.pages.clear();
     rebuildOutline();
@@ -739,18 +801,18 @@ void MainWindow::rebuildOutline()
     m_outlineTree->clear();
 
     const QVector<OutlineEntry> &builtin = m_doc.outline();
-    const bool hasBoth = !builtin.isEmpty() && !m_ocrOutline.isEmpty();
+    const bool hasBoth = !builtin.isEmpty() && !m_customOutline.isEmpty();
     const bool replace = hasBoth && m_replaceOutline && m_replaceOutline->isChecked();
     if (!replace)
         appendOutlineItems(nullptr, builtin);
-    if (!m_ocrOutline.isEmpty()) {
-        if (replace) {
-            appendOutlineItems(nullptr, m_ocrOutline);
+    if (!m_customOutline.isEmpty()) {
+        if (replace || builtin.isEmpty()) {
+            appendOutlineItems(nullptr, m_customOutline);
         } else {
             auto *root = new QTreeWidgetItem(m_outlineTree);
-            root->setText(0, QStringLiteral("OCR 目录"));
+            root->setText(0, m_customOutlineLabel);
             root->setFirstColumnSpanned(true);
-            appendOutlineItems(root, m_ocrOutline);
+            appendOutlineItems(root, m_customOutline);
             root->setExpanded(true);
         }
     }
@@ -759,12 +821,13 @@ void MainWindow::rebuildOutline()
         auto *empty = new QTreeWidgetItem(m_outlineTree);
         empty->setText(0, QStringLiteral("没有内置大纲"));
         empty->setDisabled(true);
-        empty->setToolTip(0, QStringLiteral("可以用下方按钮 OCR 目录页生成"));
+        empty->setToolTip(
+            0, QStringLiteral("可以用下方按钮 OCR 目录页生成，或导入 JSON/YAML"));
     } else {
         m_outlineTree->expandToDepth(1);
         for (int i = 0; i < m_outlineTree->topLevelItemCount(); ++i) {
             QTreeWidgetItem *item = m_outlineTree->topLevelItem(i);
-            if (item->text(0) == QStringLiteral("OCR 目录"))
+            if (item->text(0) == m_customOutlineLabel)
                 item->setExpanded(true);
         }
     }
@@ -772,9 +835,11 @@ void MainWindow::rebuildOutline()
     m_tocButton->setEnabled(m_doc.count() > 0 && !m_tocJob.active);
     m_tocButton->setText(m_tocJob.active ? QStringLiteral("正在识别目录页…")
                                          : QStringLiteral("从目录页生成…"));
+    if (m_importOutlineButton)
+        m_importOutlineButton->setEnabled(m_doc.count() > 0);
     if (m_replaceOutline)
         m_replaceOutline->setEnabled(hasBoth);
-    if (!builtin.isEmpty() || !m_ocrOutline.isEmpty())
+    if (!builtin.isEmpty() || !m_customOutline.isEmpty())
         m_leftTabs->setCurrentIndex(1);
     else
         m_leftTabs->setCurrentIndex(0);
@@ -810,19 +875,9 @@ void MainWindow::generateOutlineFromToc()
     form->addRow(QStringLiteral("目录起始页"), start);
     form->addRow(QStringLiteral("目录结束页"), end);
     layout->addLayout(form);
-    auto *mode = new QComboBox(&dialog);
-    mode->addItem(QStringLiteral("AI 整理（deepseek-flash，适合多栏/多级目录）"),
-                  QStringLiteral("agent"));
-    mode->addItem(QStringLiteral("规则解析（离线，要求「标题 …… 页码」）"),
-                  QStringLiteral("rule"));
-    mode->setToolTip(QStringLiteral(
-        "AI 会读取这些页的 OCR 文本，整理成带层级的目录；会产生少量模型费用"));
-    form->addRow(QStringLiteral("解析方式"), mode);
-
     auto *hint = new QLabel(
-        QStringLiteral("会先识别这些页；AI 模式再把 OCR 文本交给 deepseek-flash "
-                       "整理成多级目录。已识别过的页直接复用，不会重复计费。"),
-        &dialog);
+        QStringLiteral("会先识别这些页，再解析「标题 …… 页码」。\n"
+                       "已识别过的页直接复用，不会重复计费。"), &dialog);
     hint->setWordWrap(true);
     hint->setForegroundRole(QPalette::PlaceholderText);
     layout->addWidget(hint);
@@ -833,15 +888,6 @@ void MainWindow::generateOutlineFromToc()
     layout->addWidget(buttons);
     if (dialog.exec() != QDialog::Accepted)
         return;
-
-    const QString tocMode = mode->currentData().toString();
-    if (tocMode == QStringLiteral("agent") && m_apiKey.trimmed().isEmpty()) {
-        QMessageBox::warning(
-            this, QStringLiteral("缺少 API Key"),
-            QStringLiteral("AI 目录需要 API Key。请先在首选项里填写，"
-                           "或把解析方式改成「规则解析」。"));
-        return;
-    }
 
     int from = start->value() - 1;
     int to = end->value() - 1;
@@ -858,7 +904,6 @@ void MainWindow::generateOutlineFromToc()
         return;
 
     m_tocJob.pages = pages;
-    m_tocJob.mode = tocMode;
     if (missing.isEmpty()) {
         m_tocJob.active = false;
         parseTocPages();
@@ -882,24 +927,18 @@ void MainWindow::parseTocPages()
     if (m_tocJob.pages.isEmpty())
         return;
     const QVector<int> pages = m_tocJob.pages;
-    const QString mode = m_tocJob.mode;
     m_tocJob.pages.clear();
     m_tocJob.active = false;
     m_tocButton->setEnabled(true);
     m_tocButton->setText(QStringLiteral("从目录页生成…"));
 
     QStringList lines;
-    QStringList sections;
     int usable = 0;
     for (int page : pages) {
         if (page < 0 || page >= m_doc.count() || !m_doc.page(page).result.ok())
             continue;
         ++usable;
-        const QStringList pageLines = tocLinesFromResult(m_doc.page(page).result);
-        lines += pageLines;
-        sections << QStringLiteral("--- PDF 页 %1 ---\n%2")
-                        .arg(QString::number(page + 1),
-                             pageLines.join(QLatin1Char('\n')));
+        lines += tocLinesFromResult(m_doc.page(page).result);
     }
     if (usable == 0) {
         QMessageBox::information(
@@ -908,72 +947,12 @@ void MainWindow::parseTocPages()
         return;
     }
 
-    QVector<toc::Entry> entries;
-    if (mode == QStringLiteral("agent")) {
-        if (m_apiKey.trimmed().isEmpty()) {
-            QMessageBox::warning(
-                this, QStringLiteral("缺少 API Key"),
-                QStringLiteral("AI 目录需要 API Key。请先在首选项里填写，"
-                               "或把解析方式改成「规则解析」。"));
-            return;
-        }
-        toc::Agent agent;
-        QEventLoop loop;
-        QProgressDialog progress(QStringLiteral("正在用 deepseek-flash 整理目录…"),
-                                 QStringLiteral("取消"), 0, 0, this);
-        progress.setWindowTitle(QStringLiteral("生成目录"));
-        progress.setWindowModality(Qt::WindowModal);
-        progress.setMinimumDuration(0);
-        progress.setAutoClose(false);
-        progress.setAutoReset(false);
-
-        bool canceled = false;
-        QString agentError;
-        connect(&agent, &toc::Agent::finished, &loop,
-                [&](const QVector<toc::Entry> &result) {
-                    entries = result;
-                    loop.quit();
-                });
-        connect(&agent, &toc::Agent::failed, &loop, [&](const QString &error) {
-            agentError = error;
-            loop.quit();
-        });
-        connect(&progress, &QProgressDialog::canceled, &loop, [&] {
-            canceled = true;
-            agent.cancel();
-            loop.quit();
-        });
-
-        toc::AgentRequest request;
-        request.baseUrl = m_baseUrl;
-        request.apiKey = m_apiKey;
-        request.title = QFileInfo(m_doc.sourcePath()).fileName();
-        request.text = sections.join(QStringLiteral("\n\n"));
-        request.pageCount = m_doc.count();
-        QTimer::singleShot(0, &agent, [&] { agent.generate(request); });
-        progress.show();
-        loop.exec();
-        progress.close();
-
-        if (canceled) {
-            statusBar()->showMessage(QStringLiteral("已取消生成目录"), 3000);
-            return;
-        }
-        if (!agentError.isEmpty()) {
-            QMessageBox::warning(
-                this, QStringLiteral("AI 目录生成失败"),
-                QStringLiteral("%1\n\n可以把解析方式改成「规则解析」再试。").arg(agentError));
-            return;
-        }
-    } else {
-        entries = toc::parseLines(lines);
-    }
-
+    const QVector<toc::Entry> entries = toc::parseLines(lines);
     if (entries.isEmpty()) {
         QMessageBox::information(
             this, QStringLiteral("没解析出目录"),
-            QStringLiteral("识别结果里没有找到可用的目录条目。\n"
-                           "可以检查目录页是否识别正确，或换几页试试。"));
+            QStringLiteral("识别结果里没有找到「标题 …… 页码」格式的条目。\n"
+                           "也可以把目录整理成 JSON/YAML 后从「导入 JSON / YAML…」载入。"));
         return;
     }
 
@@ -1015,12 +994,66 @@ void MainWindow::parseTocPages()
 
     QVector<OutlineEntry> mapped;
     if (previewToc(entries, guessedOffset, &mapped) && !mapped.isEmpty()) {
-        m_ocrOutline = mapped;
+        m_customOutline = mapped;
+        m_customOutlineLabel = QStringLiteral("OCR 目录");
         rebuildOutline();
         m_leftTabs->setCurrentIndex(1);
         statusBar()->showMessage(
             QStringLiteral("已生成 OCR 大纲（%1 条目录项）").arg(entries.size()), 4000);
     }
+}
+
+void MainWindow::importOutline()
+{
+    if (m_doc.count() == 0) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入大纲"), QDir::homePath(),
+        QStringLiteral("大纲 (*.json *.yaml *.yml);;JSON (*.json);;YAML (*.yaml *.yml);;"
+                       "所有文件 (*)"));
+    if (!path.isEmpty())
+        importOutlineFile(path);
+}
+
+bool MainWindow::importOutlineFile(const QString &path)
+{
+    if (m_doc.count() == 0) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
+        return false;
+    }
+
+    QVector<OutlineEntry> entries;
+    QString error;
+    QStringList warnings;
+    if (!outlineio::loadFile(path, m_doc.count(), &entries, &error, &warnings)) {
+        QMessageBox::warning(this, QStringLiteral("导入大纲失败"),
+                             error.isEmpty() ? QStringLiteral("无法解析大纲文件") : error);
+        return false;
+    }
+
+    m_customOutline = entries;
+    m_customOutlineLabel = QStringLiteral("导入目录");
+
+    // 导入的意图是替换当前大纲；有内置书签时自动勾选替换。
+    if (m_replaceOutline && !m_doc.outline().isEmpty()) {
+        QSignalBlocker blocker(m_replaceOutline);
+        m_replaceOutline->setChecked(true);
+        QSettings().setValue(QStringLiteral("replaceOutlineWithOcr"), true);
+    }
+    rebuildOutline();
+    m_leftTabs->setCurrentIndex(1);
+    statusBar()->showMessage(
+        QStringLiteral("已导入大纲：%1 条顶层项（%2）").arg(entries.size()).arg(path), 6000);
+
+    if (!warnings.isEmpty()) {
+        QStringList shown = warnings.mid(0, 12);
+        if (warnings.size() > shown.size())
+            shown << QStringLiteral("…另有 %1 条").arg(warnings.size() - shown.size());
+        QMessageBox::warning(this, QStringLiteral("大纲有警告"), shown.join(QLatin1Char('\n')));
+    }
+    return true;
 }
 
 bool MainWindow::previewToc(const QVector<toc::Entry> &entries, int guessedOffset,
@@ -1264,7 +1297,7 @@ void MainWindow::updatePanels()
     m_blocks->setBlocks(entry.result.blocks, m_pageImage);
     m_textView->setPlaceholderText(QStringLiteral("识别结果会显示在这里"));
     if (entry.result.blocks.isEmpty()) {
-        if (entry.result.purpose != QStringLiteral("rich_layout_recognition")) {
+        if (!ocr::isLayoutPurpose(entry.result.purpose)) {
             m_blocks->showPlaceholder(
                 QStringLiteral("当前模式只返回纯文本\n改用「版面分析」可得到带坐标的块"));
         } else if (!ocr::hasText(entry.result.payload)) {
@@ -1286,9 +1319,31 @@ void MainWindow::updatePanels()
     m_selLabel->hide();
 }
 
+QVector<int> MainWindow::retryCandidates() const
+{
+    QVector<int> pages;
+    for (int i = 0; i < m_doc.count(); ++i) {
+        if (ocr::needsRetry(m_doc.page(i).result))
+            pages.append(i);
+    }
+    return pages;
+}
+
+void MainWindow::updateRetryButton(int count)
+{
+    if (!m_retryButton)
+        return;
+    const bool busy = m_queue.isBusy();
+    m_retryButton->setText(count > 0 ? QStringLiteral("重试失败页 (%1)").arg(count)
+                                     : QStringLiteral("重试失败页"));
+    m_retryButton->setVisible(count > 0 && !busy);
+    m_retryButton->setEnabled(count > 0 && !busy);
+}
+
 void MainWindow::updateStats()
 {
-    int done = 0, failed = 0, emptyPages = 0, tokens = 0;
+    int done = 0, failed = 0, emptyPages = 0, blankPages = 0, retryable = 0;
+    int tokens = 0;
     double seconds = 0.0;
     for (int i = 0; i < m_doc.count(); ++i) {
         const PageEntry &entry = m_doc.page(i);
@@ -1296,30 +1351,46 @@ void MainWindow::updateStats()
             ++done;
             tokens += entry.result.usage().value(QStringLiteral("total_tokens")).toInt();
             seconds += entry.result.elapsedMs / 1000.0;
-            if (entry.result.purpose == QStringLiteral("rich_layout_recognition")
-                && entry.result.blocks.isEmpty() && !ocr::hasText(entry.result.payload)) {
+            if (entry.result.blank)
+                ++blankPages;
+            if (ocr::needsRetry(entry.result)) {
                 ++emptyPages;
+                ++retryable;
             }
         } else if (!entry.result.error.isEmpty()) {
             ++failed;
+            if (ocr::needsRetry(entry.result))
+                ++retryable;
         }
     }
-    const double cost = ocrcost::actual(m_doc).total;
-    QString text = m_doc.count() == 0
-                       ? QStringLiteral("就绪")
-                       : QStringLiteral("%1/%2 页 · %3s · %4 tokens · 页费≈¥%5")
-                             .arg(done).arg(m_doc.count())
-                             .arg(seconds, 0, 'f', 1)
-                             .arg(tokens)
-                             .arg(ocrcost::formatCny(cost));
+    const bool billable = ocr::backendFromString(m_ocrBackend) != ocr::Backend::GlmOcr;
+    const double cost = ocrcost::actual(m_doc, billable).total;
+    QString text;
+    if (m_doc.count() == 0) {
+        text = QStringLiteral("就绪");
+    } else if (!billable) {
+        text = QStringLiteral("%1/%2 页 · %3s · %4 tokens · 本地 GLM-OCR")
+                   .arg(done).arg(m_doc.count())
+                   .arg(seconds, 0, 'f', 1)
+                   .arg(tokens);
+    } else {
+        text = QStringLiteral("%1/%2 页 · %3s · %4 tokens · 页费≈¥%5")
+                   .arg(done).arg(m_doc.count())
+                   .arg(seconds, 0, 'f', 1)
+                   .arg(tokens)
+                   .arg(ocrcost::formatCny(cost));
+    }
     if (failed > 0)
         text += QStringLiteral(" · %1 页失败").arg(failed);
     if (emptyPages > 0)
         text += QStringLiteral(" · %1 页空结果").arg(emptyPages);
+    if (blankPages > 0)
+        text += QStringLiteral(" · %1 页空白").arg(blankPages);
     const bool busy = m_queue.isBusy();
     if (busy)
         text += QStringLiteral(" · 识别中");
     m_statsLabel->setText(text);
+    updateRetryButton(retryable);
     m_progress->setVisible(busy);
     if (busy && !m_batchMode) {
         // 单页请求：用忙碌指示器，避免进度条看起来停在原地。
@@ -1330,13 +1401,47 @@ void MainWindow::updateStats()
     }
 }
 
+void MainWindow::retryFailedPages()
+{
+    if (m_doc.count() == 0) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
+        return;
+    }
+    if (m_queue.isBusy()) {
+        statusBar()->showMessage(QStringLiteral("当前有识别任务在进行"), 3000);
+        return;
+    }
+    const QVector<int> pages = retryCandidates();
+    if (pages.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("没有需要重试的页面"), 3000);
+        updateStats();
+        return;
+    }
+    m_batchMode = true;
+    m_retriedPages.clear();
+    if (m_stopAction)
+        m_stopAction->setEnabled(true);
+    const int count = m_queue.startPages(pages);
+    if (count == 0) {
+        m_batchMode = false;
+        if (!m_queue.isBusy() && m_stopAction)
+            m_stopAction->setEnabled(false);
+        statusBar()->showMessage(QStringLiteral("这些页面已在识别队列中"), 3000);
+        updateStats();
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("开始重试 %1 个失败/空结果页…").arg(count), 4000);
+    updateStats();
+}
+
 void MainWindow::showOcrEstimate()
 {
     if (m_doc.count() == 0) {
         statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
         return;
     }
-    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose);
+    const bool billable = ocr::backendFromString(m_ocrBackend) != ocr::Backend::GlmOcr;
+    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose, billable);
     CostDialog dialog(estimate, m_purpose, this);
     if (dialog.exec() == QDialog::Accepted && dialog.startRequested())
         startOcrAll();
@@ -1359,18 +1464,22 @@ void MainWindow::startOcrAll()
     if (count == 0) {
         if (!m_queue.isBusy() && m_stopAction)
             m_stopAction->setEnabled(false);
+        m_batchMode = false;
         statusBar()->showMessage(
             m_queue.isBusy() ? QStringLiteral("页面已在识别队列中")
                              : QStringLiteral("所有页面都已识别"),
             3000);
+        updateStats();
         return;
     }
     m_retriedPages.clear();
-    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose);
+    const bool billable = ocr::backendFromString(m_ocrBackend) != ocr::Backend::GlmOcr;
+    const ocrcost::Estimate estimate = ocrcost::estimateRemaining(m_doc, m_purpose, billable);
     statusBar()->showMessage(
-        QStringLiteral("开始识别 %1 页 · 预计 ≈¥%2（OCR 页费）")
-            .arg(count)
-            .arg(ocrcost::formatCny(estimate.pageFee)),
+        billable ? QStringLiteral("开始识别 %1 页 · 预计 ≈¥%2（OCR 页费）")
+                       .arg(count)
+                       .arg(ocrcost::formatCny(estimate.pageFee))
+                 : QStringLiteral("开始识别 %1 页 · 本地 GLM-OCR").arg(count),
         5000);
     updateStats();
 }
@@ -1441,27 +1550,27 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
     if (page < 0 || page >= m_doc.count())
         return;
 
-    const bool rich = result.purpose == QStringLiteral("rich_layout_recognition");
-    const bool empty = result.ok() && rich && result.blocks.isEmpty()
+    const bool layout = ocr::isLayoutPurpose(result.purpose);
+    const bool empty = result.ok() && layout && result.blocks.isEmpty()
                        && !ocr::hasText(result.payload);
-    const bool hasInk = empty ? OcrQueue::pageHasInk(m_doc.ensureImage(page)) : false;
+    const bool hasInk = empty && !result.blank;
 
     if (auto *item = m_pageList->item(page)) {
         if (!result.ok()) {
             item->setText(QStringLiteral("%1 ✕").arg(page + 1));
             item->setForeground(theme::tone(QColor(239, 68, 68)));
             item->setToolTip(QStringLiteral("%1\n%2").arg(m_doc.page(page).label, result.error));
-        } else if (rich && result.blocks.isEmpty() && empty && hasInk) {
+        } else if (layout && result.blocks.isEmpty() && empty && hasInk) {
             item->setText(QStringLiteral("%1 !").arg(page + 1));
             item->setForeground(theme::tone(QColor(245, 158, 11)));
             item->setToolTip(QStringLiteral("%1\n未返回文字（服务端空结果），可重试")
                                  .arg(m_doc.page(page).label));
-        } else if (rich && result.blocks.isEmpty() && empty) {
+        } else if (layout && result.blocks.isEmpty() && empty) {
             // 空白页：没有文字是正常的，不标成异常。
             item->setText(QStringLiteral("%1 ✓").arg(page + 1));
             item->setForeground(theme::tone(QColor(34, 197, 94)));
             item->setToolTip(QStringLiteral("%1\n空白页（无文字）").arg(m_doc.page(page).label));
-        } else if (rich && result.blocks.isEmpty()) {
+        } else if (layout && result.blocks.isEmpty()) {
             item->setText(QStringLiteral("%1 !").arg(page + 1));
             item->setForeground(theme::tone(QColor(245, 158, 11)));
             item->setToolTip(QStringLiteral("%1\n未返回版面块").arg(m_doc.page(page).label));
@@ -1480,8 +1589,12 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
             QString message = QStringLiteral(
                                   "第 %1 页未返回文字（服务端空结果），可再点「识别本页」重试")
                                   .arg(page + 1);
+            const QString endpoint =
+                ocr::backendFromString(m_ocrBackend) == ocr::Backend::GlmOcr
+                    ? m_glmEndpoint
+                    : m_baseUrl;
             const QString diagnostics = ocrdiag::saveEmptyResult(
-                page, m_doc.page(page), m_doc.ensureImage(page), result, m_baseUrl, m_dpi);
+                page, m_doc.page(page), m_doc.ensureImage(page), result, endpoint, m_dpi);
             if (!diagnostics.isEmpty()) {
                 message += QStringLiteral("；诊断：%1").arg(diagnostics);
                 if (auto *item = m_pageList->item(page)) {
@@ -1500,8 +1613,8 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
         statusBar()->showMessage(
             QStringLiteral("第 %1 页识别完成%2")
                 .arg(page + 1)
-                .arg(rich ? QStringLiteral(" · %1 个块").arg(result.blocks.size())
-                          : QString()),
+                .arg(layout ? QStringLiteral(" · %1 个块").arg(result.blocks.size())
+                            : QString()),
             2500);
     }
 
@@ -1561,20 +1674,20 @@ void MainWindow::exportJson()
 QVector<OutlineEntry> MainWindow::outlineForExport() const
 {
     const QVector<OutlineEntry> &builtin = m_doc.outline();
-    const bool hasBoth = !builtin.isEmpty() && !m_ocrOutline.isEmpty();
+    const bool hasBoth = !builtin.isEmpty() && !m_customOutline.isEmpty();
     const bool replace = hasBoth && m_replaceOutline && m_replaceOutline->isChecked();
 
     QVector<OutlineEntry> result;
     if (!replace)
         result += builtin;
-    if (!m_ocrOutline.isEmpty()) {
+    if (!m_customOutline.isEmpty()) {
         if (replace || builtin.isEmpty()) {
-            result += m_ocrOutline;
+            result += m_customOutline;
         } else {
             OutlineEntry root;
-            root.title = QStringLiteral("OCR 目录");
+            root.title = m_customOutlineLabel;
             root.page = -1;
-            root.children = m_ocrOutline;
+            root.children = m_customOutline;
             result.append(root);
         }
     }

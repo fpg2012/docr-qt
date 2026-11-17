@@ -19,33 +19,39 @@ QString formatCny(double value)
     return QString::number(value, 'f', 2);
 }
 
-Estimate estimateRemaining(const Document &doc, const QString &purpose)
+Estimate estimateRemaining(const Document &doc, const QString &purpose, bool billable)
 {
     Estimate result;
     result.purpose = purpose;
+    result.billable = billable;
     result.totalPages = doc.count();
     for (int i = 0; i < doc.count(); ++i) {
         if (doc.page(i).result.ok())
             ++result.donePages;
     }
     result.remainingPages = qMax(0, result.totalPages - result.donePages);
-    result.doneFee = result.donePages * kPageCny;
-    result.pageFee = result.remainingPages * kPageCny;
-    result.total = result.doneFee + result.pageFee;
+    if (billable) {
+        result.doneFee = result.donePages * kPageCny;
+        result.pageFee = result.remainingPages * kPageCny;
+        result.total = result.doneFee + result.pageFee;
+    }
     return result;
 }
 
-Estimate actual(const Document &doc)
+Estimate actual(const Document &doc, bool billable)
 {
     Estimate result;
+    result.billable = billable;
     result.totalPages = doc.count();
     for (int i = 0; i < doc.count(); ++i) {
         if (doc.page(i).result.ok())
             ++result.donePages;
     }
     result.remainingPages = qMax(0, result.totalPages - result.donePages);
-    result.doneFee = result.donePages * kPageCny;
-    result.total = result.doneFee;
+    if (billable) {
+        result.doneFee = result.donePages * kPageCny;
+        result.total = result.doneFee;
+    }
     return result;
 }
 

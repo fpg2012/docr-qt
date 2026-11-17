@@ -144,10 +144,8 @@ void PageView::setDocument(Document *document, bool showBoxes)
         maxWidth = qMax(maxWidth, page.size.width());
 
         const PageEntry &entry = m_doc->page(i);
-        if (entry.result.ok()
-            && entry.result.purpose == QStringLiteral("rich_layout_recognition")) {
+        if (entry.result.ok() && !entry.result.blocks.isEmpty())
             page.blocks = entry.result.blocks;
-        }
     }
 
     qreal y = kPageMargin;
@@ -232,10 +230,8 @@ void PageView::refreshPage(int page)
     const PageEntry &entry = m_doc->page(page);
     PageLayout &layout = m_pages[page];
     layout.blocks.clear();
-    if (entry.result.ok()
-        && entry.result.purpose == QStringLiteral("rich_layout_recognition")) {
+    if (entry.result.ok() && !entry.result.blocks.isEmpty())
         layout.blocks = entry.result.blocks;
-    }
     clearTextSelection();
     applySelection({}, false);
     // 只替换本页的平面块，避免每识别完一页都重排整本 500 页。

@@ -11,6 +11,8 @@
 
 namespace ocr {
 
+enum class Backend { DeepSeek, GlmOcr };
+
 // 一页中的一个版面块。boxes 为 0-1000 归一化坐标（页面左上角为原点）。
 struct Block {
     QString kind;
@@ -26,6 +28,7 @@ struct PageResult {
     QVector<Block> blocks;
     qint64 elapsedMs = 0;
     QString error;
+    bool blank = false; // 版面结果为空且页面无墨迹（空白页，不应重试）
 
     bool ok() const { return error.isEmpty() && !payload.isEmpty(); }
     QJsonObject usage() const { return payload.value(QStringLiteral("usage")).toObject(); }
@@ -46,6 +49,12 @@ QString textOf(const QVector<Block> &blocks, const QVector<int> &indices);
 // 是否为图片/图像版面块（不含图注）。
 bool isImageKind(const QString &kind);
 
+// rich_layout_recognition / glmocr 都会返回版面块。
+bool isLayoutPurpose(const QString &purpose);
+
+// 该页是否值得重试：请求失败，或有墨迹但没有返回任何文字/版面块。
+bool needsRetry(const PageResult &result);
+
 // 版面块类型的中文名。
 QString kindLabel(const QString &kind);
 
@@ -61,12 +70,18 @@ QColor colorForKind(const QString &kind);
 // 读取 API Key：环境变量优先，其次 DSH 凭据库（只读）。
 QString dshApiKey();
 
+QString defaultGlmEndpoint();
+Backend backendFromString(const QString &name);
+
 class Client : public QObject {
     Q_OBJECT
 public:
     explicit Client(QObject *parent = nullptr);
 
     void configure(const QString &baseUrl, const QString &apiKey);
+    void configureGlm(const QString &endpoint, const QString &model,
+                      const QString &apiKey);
+    void setBackend(Backend backend);
 
     // 异步提交一页；generation 用于丢弃取消之后到达的结果。
     void submit(int page, int generation, const QByteArray &data,
@@ -76,12 +91,23 @@ signals:
     void finished(int page, int generation, const ocr::PageResult &result);
 
 private:
+    void submitDeepSeek(int page, int generation, const QByteArray &data,
+                        const QString &filename, const QString &purpose);
+    void submitGlm(int page, int generation, const QByteArray &data);
     void handleReply(class QNetworkReply *reply, int page, int generation,
                      const QString &purpose, qint64 started);
+    void handleGlmReply(class QNetworkReply *reply, int page, int generation,
+                        qint64 started);
+    void finishGlm(int page, int generation, const QJsonObject &response,
+                   const QByteArray &raw, qint64 started);
 
     QNetworkAccessManager m_nam;
+    Backend m_backend = Backend::DeepSeek;
     QString m_baseUrl;
     QString m_apiKey;
+    QString m_glmEndpoint;
+    QString m_glmModel = QStringLiteral("glm-ocr");
+    QString m_glmApiKey;
 };
 
 } // namespace ocr

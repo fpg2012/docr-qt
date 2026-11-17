@@ -25,6 +25,17 @@ void OcrQueue::configure(const QString &baseUrl, const QString &apiKey,
     m_client.configure(baseUrl, apiKey);
 }
 
+void OcrQueue::configureGlm(const QString &endpoint, const QString &model,
+                            const QString &apiKey)
+{
+    m_client.configureGlm(endpoint, model, apiKey);
+}
+
+void OcrQueue::setBackend(ocr::Backend backend)
+{
+    m_client.setBackend(backend);
+}
+
 void OcrQueue::setPurpose(const QString &purpose)
 {
     m_purpose = purpose;
@@ -47,7 +58,8 @@ int OcrQueue::startAll()
 
     QVector<int> pages;
     for (int i = 0; i < m_doc->count(); ++i) {
-        if (!m_doc->page(i).hasResult())
+        const PageEntry &entry = m_doc->page(i);
+        if (!entry.hasResult() || ocr::needsRetry(entry.result))
             pages.append(i);
     }
     return startPages(pages);
@@ -176,14 +188,14 @@ void OcrQueue::handleResult(int page, int generation, const ocr::PageResult &res
         return;
     }
 
-    const bool rich = result.purpose == QStringLiteral("rich_layout_recognition");
-    const bool empty = result.ok() && rich && result.blocks.isEmpty()
+    const bool layout = ocr::isLayoutPurpose(result.purpose);
+    const bool empty = result.ok() && layout && result.blocks.isEmpty()
                        && !ocr::hasText(result.payload);
     // 只有空结果才需要判断页面是否有墨迹；正常页不必再做一次缩图扫描。
     const bool hasInk = empty && pageHasInk(m_doc->ensureImage(page));
 
     // 页面有内容但服务端返回空结果：自动重试一次。
-    if (empty && !m_emptyRetries.contains(page) && hasInk) {
+    if (empty && hasInk && !m_emptyRetries.contains(page)) {
         m_emptyRetries.insert(page);
         m_doc->page(page).result = ocr::PageResult();
         m_doc->releaseImage(page);
@@ -193,11 +205,13 @@ void OcrQueue::handleResult(int page, int generation, const ocr::PageResult &res
         return;
     }
 
-    m_doc->page(page).result = result;
+    ocr::PageResult final = result;
+    final.blank = empty && !hasInk;
+    m_doc->page(page).result = final;
     // 识别完的整页图不再常驻；连续视图需要时会从 PDF 重新渲染。
     // 否则批量识别 500 页会把所有整页位图都留在内存里。
     m_doc->releaseImage(page);
-    emit pageFinished(page, result);
+    emit pageFinished(page, final);
     schedulePump();
 }
 

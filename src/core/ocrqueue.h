@@ -19,6 +19,9 @@ public:
 
     void configure(const QString &baseUrl, const QString &apiKey,
                    const QString &purpose, int concurrency);
+    void configureGlm(const QString &endpoint, const QString &model,
+                      const QString &apiKey);
+    void setBackend(ocr::Backend backend);
     void setPurpose(const QString &purpose);
     void setConcurrency(int concurrency);
 
