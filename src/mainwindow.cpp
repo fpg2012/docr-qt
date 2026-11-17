@@ -190,6 +190,14 @@ void MainWindow::buildUi()
             showPage(row);
     });
     connect(m_view, &PageView::selectionChanged, this, [this] { syncCardsFromView(); });
+    connect(m_view, &PageView::textSelectionChanged, this, [this](int blocks, int chars) {
+        if (chars <= 0) {
+            m_selLabel->hide();
+            return;
+        }
+        m_selLabel->setText(QStringLiteral("已选 %1 字 · 跨 %2 个块  ").arg(chars).arg(blocks));
+        m_selLabel->show();
+    });
     connect(m_view, &PageView::textCopied, this, [this](int blocks, int chars) {
         statusBar()->showMessage(
             QStringLiteral("已复制 %1 个块 · %2 字").arg(blocks).arg(chars), 2500);
@@ -1199,8 +1207,12 @@ void MainWindow::copySelection()
             return;
         }
     }
-    if (!m_view->selection().isEmpty()) {
-        m_view->copySelection();
+    if (m_view->hasTextSelection() || !m_view->selection().isEmpty()) {
+        if (m_view->copySelection() > 0)
+            return;
+    }
+    if (m_view->tool() == PageView::Tool::Text) {
+        statusBar()->showMessage(QStringLiteral("先用鼠标拖选一段文本"), 2500);
         return;
     }
     copyText();
@@ -1253,7 +1265,8 @@ void MainWindow::setTextTool(bool on)
     m_view->setTool(on ? PageView::Tool::Text : PageView::Tool::Pointer);
     if (on)
         statusBar()->showMessage(
-            QStringLiteral("文本选择：按住左键拖动可连续选块 · Ctrl 加选 · Ctrl+C 复制"), 4000);
+            QStringLiteral("文本选择：按住左键拖动，可像文档一样跨框选中文本；Ctrl+C 复制"),
+            4000);
 }
 
 void MainWindow::showDropHint(bool on)
@@ -1300,6 +1313,13 @@ void MainWindow::selectBlocks(const QVector<int> &blocks)
     m_view->setSelection(blocks);
     syncCardsFromView();
     showBlocksTab();
+}
+
+void MainWindow::selectTextRange(int begin, int end)
+{
+    if (m_textToolAction && !m_textToolAction->isChecked())
+        m_textToolAction->setChecked(true);
+    m_view->selectTextRange(begin, end);
 }
 
 void MainWindow::showBlocksTab()

@@ -110,13 +110,18 @@ cmake --build build -j
 
 ### 选中文本工具
 
-工具栏的 I 形光标按钮（或「视图 → 选中文本」）开启后：
+工具栏的 I 形光标按钮（或「视图 → 选中文本」）开启后，行为接近文档编辑器：
 
-- 在页面上按住左键拖动，经过的版面块会被连续选中；
-- `Ctrl+点击` 追加单个块，`Ctrl+C` 复制；
-- 适合从左到右、从上到下扫一段正文，再一次性复制。
+- 在文字上按下左键拖动，按字符选中；起止点可以在不同的版面块里，
+  中间跨过的块自动整段选中；
+- 高亮按每块内的文本排版逐行绘制，支持只选中某一行的一部分；
+- `Ctrl+C` 或右键「复制选中文本」复制**精确的子串**；`Esc` 取消；
+- 选择文本时不会自动切到右侧卡片，和整块选择互不干扰。
 
-选择粒度为版面块（API 返回的最小单位），不是字符级。
+![字符级文本选择](docs/screenshot-textselect.png)
+
+OCR 只提供块级坐标，行内高亮位置是按块框和文本重新排版估算的，可能和扫描件字形有
+几像素偏差；复制出来的文字不受影响，是精确的字符区间。
 
 ### 版面块卡片
 
@@ -195,17 +200,19 @@ API Key 解析顺序：
 ./build/docr-qt --open a.pdf --open b.png               # 多文件混排（--open 可重复）
 ./build/docr-qt --open page.png --mock out/rich_layout_recognition.json
 ./build/docr-qt --open page.png --mock out/rich_layout_recognition.json --select 0,1,2
+./build/docr-qt --open page.png --mock out/rich_layout_recognition.json --text-select 0,80
 ./build/docr-qt --open doc.pdf --page 5 --ocr-current --screenshot page5.png  # 只识别当前页
 ./build/docr-qt --open page.png --ocr --screenshot ui.png  # 识别完成后截图退出（CI/无头）
 ```
 
-`--select 0,1,2` 选中第 1 页的指定块（调试用，便于截图/回归），`--page N` 启动后跳到第 N 页，
+`--select 0,1,2` 选中第 1 页的指定块（调试用，便于截图/回归），
+`--text-select 0,80` 按全局字符偏移选中一段文本，`--page N` 启动后跳到第 N 页，
 `--ocr-current` 只识别当前页，`--drop-hint` 强制显示拖入提示框。
 
 ## 已知限制
 
 - 不支持的输入：加密 PDF、带 DRM 的电子书；音频/视频不在本工具范围。
-- 文字选择以版面块为单位，不能像 PDF 阅读器那样按字符选择。
+- 文本选择的高亮是按块框重新排版估算的，和扫描件字形可能有几像素偏差；复制内容精确。
 - 阅读顺序按块左上角排序（同一行再按 x），多栏文档的跨栏复制顺序可能不理想。
 - 图片卡片依赖块坐标；`text_recognition` 模式没有坐标，只显示文本。
 - 未做整页图像缓存淘汰，超大文档（数百页）常驻内存偏高，后续可加 LRU。

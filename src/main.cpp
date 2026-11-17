@@ -37,6 +37,9 @@ int main(int argc, char *argv[])
     QCommandLineOption selectOption(QStringLiteral("select"),
                                     QStringLiteral("调试：选中第 1 页的指定版面块（逗号分隔，隐含切到「版面块」页）"),
                                     QStringLiteral("indices"));
+    QCommandLineOption textSelectOption(
+        QStringLiteral("text-select"),
+        QStringLiteral("调试：按字符偏移选中文本（begin,end）"), QStringLiteral("range"));
     QCommandLineOption dropHintOption(QStringLiteral("drop-hint"),
                                       QStringLiteral("调试：显示拖入提示框"));
     QCommandLineOption pageOption(QStringLiteral("page"),
@@ -45,7 +48,7 @@ int main(int argc, char *argv[])
     QCommandLineOption darkOption(QStringLiteral("dark"), QStringLiteral("强制深色方案（调试用）"));
     QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
     parser.addOptions({openOption, ocrOption, ocrCurrentOption, screenshotOption, mockOption, purposeOption,
-                       selectOption, dropHintOption, pageOption, darkOption, lightOption});
+                       selectOption, textSelectOption, dropHintOption, pageOption, darkOption, lightOption});
     parser.process(app);
 
     if (parser.isSet(darkOption))
@@ -82,6 +85,16 @@ int main(int argc, char *argv[])
                 blocks.append(index);
         }
         window.selectBlocks(blocks);
+    }
+    if (parser.isSet(textSelectOption)) {
+        const QStringList parts = parser.value(textSelectOption).split(QLatin1Char(','));
+        if (parts.size() == 2) {
+            bool ok1 = false, ok2 = false;
+            const int begin = parts.at(0).toInt(&ok1);
+            const int end = parts.at(1).toInt(&ok2);
+            if (ok1 && ok2)
+                window.selectTextRange(begin, end);
+        }
     }
     if (parser.isSet(dropHintOption))
         window.setDropHintVisible(true);

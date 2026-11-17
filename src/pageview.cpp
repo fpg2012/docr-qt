@@ -12,6 +12,10 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QScrollBar>
+#include <QTextLayout>
+#include <QTextOption>
+
+#include <limits>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -28,6 +32,27 @@ QPen bandPen(const QColor &color)
     pen.setCosmetic(true);
     pen.setDashPattern({5, 4});
     return pen;
+}
+
+int textLineCount(const QFont &font, qreal width, const QString &text)
+{
+    if (text.isEmpty() || width <= 0)
+        return 0;
+    QTextLayout layout(text, font);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    int lines = 0;
+    while (true) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(width);
+        ++lines;
+    }
+    layout.endLayout();
+    return lines;
 }
 
 } // namespace
@@ -53,6 +78,7 @@ PageView::PageView(QWidget *parent)
 
 void PageView::setPage(const QImage &image, const QVector<ocr::Block> &blocks, bool showBoxes)
 {
+    clearTextSelection();
     const bool hadSelection = !m_selection.isEmpty();
     m_image = image;
     m_blocks = blocks;
@@ -71,6 +97,10 @@ void PageView::setPage(const QImage &image, const QVector<ocr::Block> &blocks, b
     m_order.clear();
 
     if (image.isNull()) {
+        m_texts.clear();
+        m_textStart.clear();
+        m_textFonts.clear();
+        m_flowText.clear();
         if (hadSelection)
             emit selectionChanged({});
         return;
@@ -92,6 +122,7 @@ void PageView::setPage(const QImage &image, const QVector<ocr::Block> &blocks, b
 
 void PageView::clearPage()
 {
+    clearTextSelection();
     m_image = QImage();
     m_blocks.clear();
     m_order.clear();
@@ -104,6 +135,10 @@ void PageView::clearPage()
     m_hover = -1;
     m_banding = false;
     m_band = nullptr;
+    m_texts.clear();
+    m_textStart.clear();
+    m_textFonts.clear();
+    m_flowText.clear();
     m_scene->clear();
     m_pixmap = nullptr;
 }
@@ -165,8 +200,39 @@ void PageView::rebuildItems()
         return leftOf(a) < leftOf(b);
     });
 
+    rebuildTextFlow();
     repaintAll();
     setBoxesVisible(m_boxesVisible);
+}
+
+void PageView::rebuildTextFlow()
+{
+    const int n = m_blocks.size();
+    m_texts.resize(n);
+    m_textStart = QVector<int>(n, -1);
+    m_textFonts = QVector<QFont>(n);
+    m_flowText.clear();
+
+    for (int i = 0; i < n; ++i)
+        m_texts[i] = ocr::displayText(m_blocks.at(i).text);
+
+    bool first = true;
+    for (int block : m_order) {
+        if (m_texts.at(block).isEmpty())
+            continue;
+        if (!first)
+            m_flowText += QLatin1Char('\n');
+        m_textStart[block] = m_flowText.size();
+        m_flowText += m_texts.at(block);
+        first = false;
+    }
+
+    m_textAnchor = -1;
+    m_textBegin = -1;
+    m_textEnd = -1;
+    m_textCaret = -1;
+    m_textHasSelection = false;
+    m_textDragging = false;
 }
 
 void PageView::repaintBlock(int index)
@@ -211,6 +277,7 @@ void PageView::applySelection(const QSet<int> &next, bool notify)
 
 void PageView::setSelection(const QVector<int> &blocks, bool notify)
 {
+    clearTextSelection();
     QSet<int> next;
     for (int index : blocks) {
         if (index >= 0 && index < m_blocks.size())
@@ -229,8 +296,158 @@ void PageView::updateHover(int index)
     repaintBlock(index);
 }
 
+QRectF PageView::blockBox(int block) const
+{
+    QRectF rect;
+    for (const BoxRef &ref : m_items) {
+        if (ref.block != block)
+            continue;
+        rect = rect.isNull() ? ref.item->sceneBoundingRect()
+                             : rect.united(ref.item->sceneBoundingRect());
+    }
+    return rect;
+}
+
+QFont PageView::textFontFor(int block, const QRectF &box) const
+{
+    if (block < 0 || block >= m_textFonts.size())
+        return font();
+    if (m_textFonts.at(block).pixelSize() > 0)
+        return m_textFonts.at(block);
+
+    QFont base = font();
+    const QString &text = m_texts.at(block);
+    const int maxPx = qBound(6, int(box.height() * 0.9), 64);
+    for (int px = maxPx; px >= 6; --px) {
+        base.setPixelSize(px);
+        const int lines = textLineCount(base, box.width(), text);
+        const qreal total = lines * QFontMetrics(base).lineSpacing();
+        if (total <= box.height() * 1.08) {
+            m_textFonts[block] = base;
+            return base;
+        }
+    }
+    base.setPixelSize(6);
+    m_textFonts[block] = base;
+    return base;
+}
+
+int PageView::charAt(int block, const QPointF &scenePos) const
+{
+    if (block < 0 || block >= m_texts.size() || m_texts.at(block).isEmpty())
+        return -1;
+    const QRectF box = blockBox(block);
+    if (box.isEmpty() || box.width() <= 0)
+        return -1;
+
+    const QFont f = textFontFor(block, box);
+    QTextLayout layout(m_texts.at(block), f);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    while (true) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(box.width());
+    }
+    layout.endLayout();
+    if (layout.lineCount() == 0)
+        return -1;
+
+    const QPointF p = scenePos - box.topLeft();
+    int bestLine = 0;
+    qreal bestDistance = std::numeric_limits<qreal>::max();
+    for (int i = 0; i < layout.lineCount(); ++i) {
+        const QTextLine line = layout.lineAt(i);
+        const qreal distance = qAbs(p.y() - (line.y() + line.height() / 2.0));
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            bestLine = i;
+        }
+    }
+    const QTextLine line = layout.lineAt(bestLine);
+    const int cursor = line.xToCursor(p.x() - line.x());
+    return qBound(0, cursor, m_texts.at(block).size());
+}
+
+int PageView::textOffsetAt(const QPointF &scenePos) const
+{
+    const int block = blockAtScene(scenePos);
+    if (block < 0 || block >= m_textStart.size() || m_textStart.at(block) < 0)
+        return -1;
+    const int ch = charAt(block, scenePos);
+    if (ch < 0)
+        return -1;
+    return m_textStart.at(block) + ch;
+}
+
+void PageView::setTextRange(int begin, int end, int caret)
+{
+    if (m_flowText.isEmpty()) {
+        clearTextSelection();
+        return;
+    }
+    m_textBegin = qBound(0, begin, m_flowText.size());
+    m_textEnd = qBound(0, end, m_flowText.size());
+    if (m_textEnd < m_textBegin)
+        std::swap(m_textBegin, m_textEnd);
+    m_textCaret = qBound(0, caret, m_flowText.size());
+    m_textHasSelection = m_textEnd > m_textBegin;
+
+    int blocks = 0;
+    for (int block : m_order) {
+        if (m_textStart.at(block) < 0)
+            continue;
+        const int start = m_textStart.at(block);
+        const int stop = start + m_texts.at(block).size();
+        if (start < m_textEnd && stop > m_textBegin)
+            ++blocks;
+    }
+    viewport()->update();
+    emit textSelectionChanged(blocks, m_textHasSelection ? m_textEnd - m_textBegin : 0);
+}
+
+void PageView::selectTextRange(int begin, int end)
+{
+    if (m_flowText.isEmpty())
+        return;
+    begin = qBound(0, begin, m_flowText.size());
+    end = qBound(0, end, m_flowText.size());
+    m_textAnchor = begin;
+    setTextRange(qMin(begin, end), qMax(begin, end), end);
+}
+
+void PageView::clearTextSelection()
+{
+    if (m_textBegin < 0 && m_textEnd < 0 && m_textCaret < 0 && m_textAnchor < 0)
+        return;
+    m_textAnchor = -1;
+    m_textBegin = -1;
+    m_textEnd = -1;
+    m_textCaret = -1;
+    m_textHasSelection = false;
+    m_textDragging = false;
+    viewport()->update();
+    emit textSelectionChanged(0, 0);
+}
+
 QVector<int> PageView::selection() const
 {
+    if (m_textHasSelection) {
+        QVector<int> result;
+        for (int block : m_order) {
+            if (m_textStart.at(block) < 0)
+                continue;
+            const int start = m_textStart.at(block);
+            const int stop = start + m_texts.at(block).size();
+            if (start < m_textEnd && stop > m_textBegin)
+                result.append(block);
+        }
+        return result;
+    }
+
     QVector<int> result;
     result.reserve(m_selection.size());
     for (int index : m_order) {
@@ -242,6 +459,9 @@ QVector<int> PageView::selection() const
 
 QString PageView::selectedText() const
 {
+    if (m_textHasSelection)
+        return m_flowText.mid(m_textBegin, m_textEnd - m_textBegin);
+
     QStringList parts;
     for (int index : m_order) {
         if (!m_selection.contains(index))
@@ -255,6 +475,15 @@ QString PageView::selectedText() const
 
 int PageView::copySelection()
 {
+    if (m_textHasSelection) {
+        const QString text = selectedText();
+        if (text.isEmpty())
+            return 0;
+        QApplication::clipboard()->setText(text);
+        emit textCopied(selection().size(), text.size());
+        return selection().size();
+    }
+
     const int count = m_selection.size();
     if (count == 0)
         return 0;
@@ -353,15 +582,8 @@ void PageView::finishBand(bool commit)
 
 void PageView::ensureBlockVisible(int index)
 {
-    QRectF rect;
-    bool found = false;
-    for (const BoxRef &ref : m_items) {
-        if (ref.block != index)
-            continue;
-        rect = found ? rect.united(ref.item->sceneBoundingRect()) : ref.item->sceneBoundingRect();
-        found = true;
-    }
-    if (found)
+    const QRectF rect = blockBox(index);
+    if (!rect.isEmpty())
         ensureVisible(rect.adjusted(-20, -20, 20, 20), 24, 24);
 }
 
@@ -369,6 +591,11 @@ void PageView::setTool(Tool tool)
 {
     if (m_tool == tool)
         return;
+    if (m_tool == Tool::Text)
+        clearTextSelection();
+    if (tool == Tool::Text)
+        applySelection({});
+    clearTextSelection();
     m_tool = tool;
     if (m_banding)
         finishBand(false);
@@ -420,11 +647,18 @@ void PageView::keyPressEvent(QKeyEvent *event)
             event->accept();
         return;
     }
-    if (event->key() == Qt::Key_Escape && !m_selection.isEmpty()) {
-        m_anchor = -1;
-        applySelection({});
-        event->accept();
-        return;
+    if (event->key() == Qt::Key_Escape) {
+        if (m_textHasSelection || m_textCaret >= 0) {
+            clearTextSelection();
+            event->accept();
+            return;
+        }
+        if (!m_selection.isEmpty()) {
+            m_anchor = -1;
+            applySelection({});
+            event->accept();
+            return;
+        }
     }
     if (event->key() == Qt::Key_PageDown || event->key() == Qt::Key_PageUp) {
         auto *bar = verticalScrollBar();
@@ -449,6 +683,22 @@ void PageView::mousePressEvent(QMouseEvent *event)
     }
 
     const QPoint pos = event->pos();
+
+    if (m_tool == Tool::Text) {
+        const int offset = textOffsetAt(mapToScene(pos));
+        if (offset < 0) {
+            clearTextSelection();
+            return;
+        }
+        if (!m_selection.isEmpty())
+            applySelection({});
+        setFocus();
+        m_textAnchor = offset;
+        m_textDragging = true;
+        setTextRange(offset, offset, offset);
+        return;
+    }
+
     const int hit = blockAt(pos);
     const bool ctrl = event->modifiers().testFlag(Qt::ControlModifier);
 
@@ -457,18 +707,6 @@ void PageView::mousePressEvent(QMouseEvent *event)
         m_anchor = hit;
         m_pendingToggle = hit;
         m_bandBase = m_selection;
-        beginBand(pos);
-        return;
-    }
-
-    if (m_tool == Tool::Text) {
-        m_anchor = hit;
-        m_bandBase.clear();
-        if (hit >= 0)
-            m_bandBase.insert(hit);
-        applySelection(m_bandBase);
-        if (hit >= 0)
-            emit blockClicked(hit);
         beginBand(pos);
         return;
     }
@@ -487,6 +725,14 @@ void PageView::mousePressEvent(QMouseEvent *event)
 
 void PageView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_textDragging) {
+        const int offset = textOffsetAt(mapToScene(event->pos()));
+        if (offset >= 0) {
+            setTextRange(qMin(m_textAnchor, offset), qMax(m_textAnchor, offset), offset);
+        }
+        event->accept();
+        return;
+    }
     if (m_banding) {
         updateBand(event->pos());
         event->accept();
@@ -502,6 +748,11 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
 
 void PageView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_textDragging && event->button() == Qt::LeftButton) {
+        m_textDragging = false;
+        event->accept();
+        return;
+    }
     if (m_banding && event->button() == Qt::LeftButton) {
         updateBand(event->pos());
         finishBand(true);
@@ -513,6 +764,25 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
 
 void PageView::contextMenuEvent(QContextMenuEvent *event)
 {
+    if (m_tool == Tool::Text) {
+        QMenu menu(this);
+        QAction *copy = menu.addAction(theme::icon(QStringLiteral("copy")),
+                                       m_textHasSelection
+                                           ? QStringLiteral("复制选中文本")
+                                           : QStringLiteral("复制文本"));
+        copy->setEnabled(m_textHasSelection);
+        menu.addSeparator();
+        QAction *clear = menu.addAction(QStringLiteral("取消选择"));
+        clear->setEnabled(m_textHasSelection || m_textCaret >= 0);
+
+        QAction *chosen = menu.exec(event->globalPos());
+        if (chosen == copy)
+            copySelection();
+        else if (chosen == clear)
+            clearTextSelection();
+        return;
+    }
+
     const int hit = blockAt(event->pos());
     if (hit >= 0 && !m_selection.contains(hit)) {
         m_anchor = hit;
@@ -538,6 +808,85 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
         m_anchor = -1;
         applySelection({});
     }
+}
+
+void PageView::drawForeground(QPainter *painter, const QRectF &rect)
+{
+    QGraphicsView::drawForeground(painter, rect);
+    paintTextSelection(painter);
+}
+
+void PageView::paintTextSelection(QPainter *painter) const
+{
+    if (m_textBegin < 0 && m_textCaret < 0)
+        return;
+
+    painter->save();
+    QColor highlight = palette().color(QPalette::Highlight);
+    QColor fill = highlight;
+    fill.setAlpha(85);
+    QPen caretPen(highlight, 1.2);
+    caretPen.setCosmetic(true);
+    bool caretDrawn = false;
+
+    for (int block : m_order) {
+        if (block < 0 || block >= m_textStart.size() || m_textStart.at(block) < 0)
+            continue;
+        const int blockStart = m_textStart.at(block);
+        const int blockEnd = blockStart + m_texts.at(block).size();
+
+        if (m_textHasSelection) {
+            if (blockStart >= m_textEnd || blockEnd <= m_textBegin)
+                continue;
+        } else if (m_textCaret < blockStart || m_textCaret > blockEnd) {
+            continue;
+        }
+
+        const QRectF box = blockBox(block);
+        if (box.isEmpty() || box.width() <= 0)
+            continue;
+
+        const QFont f = textFontFor(block, box);
+        QTextLayout layout(m_texts.at(block), f);
+        QTextOption option;
+        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+        layout.setTextOption(option);
+        layout.beginLayout();
+        while (true) {
+            QTextLine line = layout.createLine();
+            if (!line.isValid())
+                break;
+            line.setLineWidth(box.width());
+        }
+        layout.endLayout();
+
+        for (int i = 0; i < layout.lineCount(); ++i) {
+            const QTextLine line = layout.lineAt(i);
+            const int lineStart = line.textStart();
+            const int lineEnd = lineStart + line.textLength();
+
+            if (m_textHasSelection) {
+                const int localBegin = qMax(m_textBegin - blockStart, lineStart);
+                const int localEnd = qMin(m_textEnd - blockStart, lineEnd);
+                if (localBegin >= localEnd)
+                    continue;
+                const qreal x1 = line.cursorToX(localBegin);
+                const qreal x2 = line.cursorToX(localEnd);
+                const QRectF r(box.left() + line.x() + x1, box.top() + line.y(),
+                               qMax<qreal>(1.0, x2 - x1), line.height());
+                painter->fillRect(r, fill);
+            } else if (!caretDrawn && m_textCaret >= blockStart + lineStart
+                       && m_textCaret <= blockStart + lineEnd) {
+                const qreal x = line.cursorToX(m_textCaret - blockStart);
+                painter->setPen(caretPen);
+                painter->drawLine(QPointF(box.left() + line.x() + x, box.top() + line.y()),
+                                  QPointF(box.left() + line.x() + x,
+                                          box.top() + line.y() + line.height()));
+                caretDrawn = true;
+            }
+        }
+    }
+    painter->restore();
 }
 
 void PageView::leaveEvent(QEvent *event)

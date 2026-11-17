@@ -37,6 +37,7 @@ public:
     void injectMockResult(const QString &jsonPath);
     // 调试入口：选中当前页的若干版面块。
     void selectBlocks(const QVector<int> &blocks);
+    void selectTextRange(int begin, int end);
     void showBlocksTab();
     // 调试入口：强制显示拖入提示框。
     void setDropHintVisible(bool on);
