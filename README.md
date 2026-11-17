@@ -1,9 +1,6 @@
 # docr-qt
 
-![截图（深色）](docs/screenshot-dark.png)
-
-浅色方案见 `docs/screenshot-light.png`，拖入提示见 `docs/screenshot-drop.png`，
-首选项与关于见 `docs/preferences.png`、`docs/about.png`，大纲见 `docs/outline.png`。
+![docr-qt](docs/screenshot-dark.png)
 
 DeepSeek OCR 的 Qt 6 桌面前端：拖入 PDF 或图片序列，逐页调用
 `POST /v1/tools/ocr`，把返回的 `<|ref|>/<|box|>` 版面坐标叠加显示在页面上。
@@ -83,12 +80,8 @@ cmake --build build -j
   留空时按环境变量、DSH 凭据库的顺序回退。
 - **识别**：默认 purpose、渲染 dpi、并发数。
 
-![首选项](docs/preferences.png)
-
 「帮助 → 关于 docr-qt」显示版本、Qt 版本、接口地址和当前识别模式；「关于 Qt」是 Qt 自带的
 版本信息。
-
-![关于](docs/about.png)
 
 ## 使用
 
@@ -114,8 +107,6 @@ cmake --build build -j
   所以打开几百页的 PDF 也不会一次性把所有页读进内存。
 
 ### 大纲
-
-![大纲](docs/outline.png)
 
 - 左侧 dock 有「页面」和「大纲」两个页签；PDF 自带书签时，打开后会直接切到「大纲」。
 - 点击大纲条目跳转到对应页；层级按 PDF 书签或目录编号展开。
@@ -149,8 +140,6 @@ OCR 生成的目录依赖目录页本身的识别质量。如果某些行没解�
 - 高亮按每块内的文本排版逐行绘制，支持只选中某一行的一部分；
 - `Ctrl+C` 或右键「复制选中文本」复制**精确的子串**；`Esc` 取消；
 - 选择文本时不会自动切到右侧卡片，和整块选择互不干扰。
-
-![字符级文本选择](docs/screenshot-textselect.png)
 
 OCR 只提供块级坐标，行内高亮位置是按块框和文本重新排版估算的，可能和扫描件字形有
 几像素偏差；复制出来的文字不受影响，是精确的字符区间。
