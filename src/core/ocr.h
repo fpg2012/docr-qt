@@ -43,6 +43,9 @@ QString displayText(const QString &raw);
 // 按给定顺序拼接若干块的文本，块之间用换行分隔。
 QString textOf(const QVector<Block> &blocks, const QVector<int> &indices);
 
+// 是否为图片/图像版面块（不含图注）。
+bool isImageKind(const QString &kind);
+
 // 版面块类型的中文名。
 QString kindLabel(const QString &kind);
 

@@ -272,8 +272,7 @@ void BlockCardList::setBlocks(const QVector<ocr::Block> &blocks, const QImage &p
         item->setData(BlockIndexRole, i);
         item->setData(BlockKindRole, block.kind);
 
-        const bool isFigure = block.kind == QLatin1String("image")
-                              || block.kind == QLatin1String("figure");
+        const bool isFigure = ocr::isImageKind(block.kind);
         QPixmap pixmap;
         if (isFigure && !pageImage.isNull() && !block.boxes.isEmpty()) {
             QRectF unionRect;
@@ -409,13 +408,32 @@ void BlockCardList::contextMenuEvent(QContextMenuEvent *event)
     if (!item)
         return;
 
+    const int blockIndex = item->data(BlockIndexRole).toInt();
+    const bool isImage = ocr::isImageKind(item->data(BlockKindRole).toString());
     QMenu menu(this);
+    QAction *copyImage = nullptr;
+    QAction *exportImage = nullptr;
+    if (isImage) {
+        copyImage = menu.addAction(theme::icon(QStringLiteral("copy")),
+                                   QStringLiteral("复制图片"));
+        exportImage = menu.addAction(QStringLiteral("导出 PNG…"));
+        menu.addSeparator();
+    }
+
     QAction *copy = menu.addAction(theme::icon(QStringLiteral("copy")),
                                    selectedItems().size() > 1
                                        ? QStringLiteral("复制 %1 个块的文本")
                                              .arg(selectedItems().size())
                                        : QStringLiteral("复制文本"));
+    if (isImage)
+        copy->setEnabled(!item->data(BlockTextRole).toString().trimmed().isEmpty());
+
     QAction *chosen = menu.exec(viewport()->mapToGlobal(event->pos()));
-    if (chosen == copy)
+    if (chosen == copyImage) {
+        emit imageCopyRequested(blockIndex);
+    } else if (chosen == exportImage) {
+        emit imageExportRequested(blockIndex);
+    } else if (chosen == copy) {
         emit copyRequested();
+    }
 }

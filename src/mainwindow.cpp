@@ -287,6 +287,11 @@ void MainWindow::buildUi()
         statusBar()->showMessage(
             QStringLiteral("已复制 %1 个块 · %2 字").arg(blocks).arg(chars), 2500);
     });
+    connect(m_view, &PageView::imageCopied, this, [this] {
+        statusBar()->showMessage(QStringLiteral("已复制图片"), 2500);
+    });
+    connect(m_view, &PageView::imageExportRequested, this,
+            [this](int page, int block) { exportBlockImage(page, block); });
     connect(m_view, &PageView::currentPageChanged, this, [this](int page) {
         if (page < 0 || page >= m_doc.count())
             return;
@@ -305,6 +310,12 @@ void MainWindow::buildUi()
     connect(m_blocks, &BlockCardList::cardsSelectionChanged, this,
             [this] { syncViewFromCards(); });
     connect(m_blocks, &BlockCardList::copyRequested, this, [this] { copySelection(); });
+    connect(m_blocks, &BlockCardList::imageCopyRequested, this, [this](int block) {
+        copyBlockImage(m_view->currentPage(), block);
+    });
+    connect(m_blocks, &BlockCardList::imageExportRequested, this, [this](int block) {
+        exportBlockImage(m_view->currentPage(), block);
+    });
     connect(m_blocks, &BlockCardList::blockActivated, this, [this](int index) {
         m_view->ensureBlockVisible(index);
     });
@@ -448,7 +459,7 @@ void MainWindow::buildActions()
     toolbar->addSeparator();
     toolbar->addAction(settings);
 
-    auto *copySelectionAction = new QAction(QStringLiteral("复制选中文本"), this);
+    auto *copySelectionAction = new QAction(QStringLiteral("复制选中内容"), this);
     copySelectionAction->setShortcut(QKeySequence::Copy);
     connect(copySelectionAction, &QAction::triggered, this, [this] { copySelection(); });
     auto *copyPageAction = new QAction(QStringLiteral("复制本页文本"), this);
@@ -1481,6 +1492,65 @@ void MainWindow::copyText()
     statusBar()->showMessage(QStringLiteral("已复制本页文本"), 2000);
 }
 
+bool MainWindow::copyBlockImage(int page, int block)
+{
+    if (page < 0 || page >= m_doc.count())
+        return false;
+    const PageEntry &entry = m_doc.page(page);
+    if (block < 0 || block >= entry.result.blocks.size()
+        || !ocr::isImageKind(entry.result.blocks.at(block).kind))
+        return false;
+    const QImage image = m_doc.blockImage(page, block);
+    if (image.isNull()) {
+        statusBar()->showMessage(QStringLiteral("无法读取图片区域"), 3000);
+        return false;
+    }
+    QApplication::clipboard()->setImage(image);
+    statusBar()->showMessage(
+        QStringLiteral("已复制图片 · %1×%2").arg(image.width()).arg(image.height()), 2500);
+    return true;
+}
+
+void MainWindow::exportBlockImage(int page, int block)
+{
+    if (page < 0 || page >= m_doc.count())
+        return;
+    const PageEntry &entry = m_doc.page(page);
+    if (block < 0 || block >= entry.result.blocks.size()
+        || !ocr::isImageKind(entry.result.blocks.at(block).kind))
+        return;
+
+    QString base = QStringLiteral("image");
+    if (!entry.sourcePath.isEmpty()) {
+        const QFileInfo info(entry.sourcePath);
+        const QString name = info.completeBaseName();
+        if (!name.isEmpty())
+            base = name;
+    }
+    QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出 PNG"),
+        QDir::homePath() + QLatin1Char('/') + base
+            + QStringLiteral("-p%1-b%2.png").arg(page + 1).arg(block + 1),
+        QStringLiteral("PNG 图片 (*.png)"));
+    if (path.isEmpty())
+        return;
+    if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+        path += QStringLiteral(".png");
+
+    const QImage image = m_doc.blockImage(page, block);
+    if (image.isNull()) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"),
+                             QStringLiteral("无法读取该图片区域"));
+        return;
+    }
+    if (!image.save(path, "PNG")) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"),
+                             QStringLiteral("无法写入图片：%1").arg(path));
+        return;
+    }
+    statusBar()->showMessage(QStringLiteral("已导出 PNG：%1").arg(path), 5000);
+}
+
 void MainWindow::copySelection()
 {
     if (auto *edit = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget())) {
@@ -1508,9 +1578,21 @@ void MainWindow::showSelectionStatus()
         m_selLabel->hide();
         return;
     }
-    m_selLabel->setText(QStringLiteral("已选 %1 个块 · %2 字   ")
-                            .arg(selection.size())
-                            .arg(m_view->selectedText().size()));
+    int imageBlocks = 0;
+    const int page = m_view->currentPage();
+    if (page >= 0 && page < m_doc.count()) {
+        const auto &blocks = m_doc.page(page).result.blocks;
+        for (int index : selection) {
+            if (index >= 0 && index < blocks.size() && ocr::isImageKind(blocks.at(index).kind))
+                ++imageBlocks;
+        }
+    }
+    if (imageBlocks == selection.size())
+        m_selLabel->setText(QStringLiteral("已选 %1 个图片块   ").arg(imageBlocks));
+    else
+        m_selLabel->setText(QStringLiteral("已选 %1 个块 · %2 字   ")
+                                .arg(selection.size())
+                                .arg(m_view->selectedText().size()));
     m_selLabel->show();
 }
 

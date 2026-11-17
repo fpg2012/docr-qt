@@ -73,6 +73,9 @@ public:
     // PDF 自带的、和物理页号不同的页码标签（如 "iv"）；没有则返回空。
     QString pageLabel(int index) const;
 
+    // 裁剪指定版面块的页面区域（完整分辨率），用于复制/导出图片。
+    QImage blockImage(int page, int block);
+
     // 图片序列可用的后缀（供目录展开与文件对话框复用）。
     static QStringList imageNameFilters();
 

@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 #include <QFont>
 #include <QGraphicsView>
+#include <QImage>
 #include <QSet>
 #include <QVector>
 
@@ -68,6 +69,8 @@ signals:
     void selectionChanged(const QVector<int> &blocks);
     void textSelectionChanged(int blocks, int chars);
     void textCopied(int blocks, int chars);
+    void imageCopied();
+    void imageExportRequested(int page, int block);
     void currentPageChanged(int page);
 
 protected:
@@ -134,6 +137,9 @@ private:
     void applySelection(const QSet<int> &next, bool notify = true);
     void setCurrentPageInternal(int page, bool scroll);
 
+    bool flatIsImage(int flat) const;
+    QImage imageForFlat(int flat);
+    bool copyImage(int flat);
     QRectF blockBox(int flat) const;
     int charIndexAt(int flat, const QPointF &scenePos) const;
     int textOffsetAt(const QPointF &scenePos) const;

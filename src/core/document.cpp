@@ -260,6 +260,36 @@ void Document::releaseImage(int index)
     m_pages[index].image = QImage();
 }
 
+QImage Document::blockImage(int pageIndex, int blockIndex)
+{
+    if (pageIndex < 0 || pageIndex >= m_pages.size())
+        return {};
+    const PageEntry &entry = m_pages.at(pageIndex);
+    if (blockIndex < 0 || blockIndex >= entry.result.blocks.size())
+        return {};
+    const ocr::Block &block = entry.result.blocks.at(blockIndex);
+    if (block.boxes.isEmpty())
+        return {};
+
+    QRectF unionRect;
+    for (const QRectF &box : block.boxes)
+        unionRect = unionRect.isNull() ? box : unionRect.united(box);
+    if (unionRect.width() <= 0 || unionRect.height() <= 0)
+        return {};
+
+    const QImage image = ensureImage(pageIndex);
+    if (image.isNull())
+        return {};
+    QRect pixel(qRound(unionRect.x() * image.width() / 1000.0),
+                qRound(unionRect.y() * image.height() / 1000.0),
+                qRound(unionRect.width() * image.width() / 1000.0),
+                qRound(unionRect.height() * image.height() / 1000.0));
+    pixel = pixel.intersected(image.rect());
+    if (pixel.width() < 1 || pixel.height() < 1)
+        return {};
+    return image.copy(pixel);
+}
+
 QString Document::pageLabel(int index) const
 {
     if (index < 0 || index >= m_pages.size())

@@ -674,6 +674,23 @@ QString PageView::selectedText() const
 
 int PageView::copySelection()
 {
+    if (!m_textHasSelection) {
+        const QVector<int> blocks = selection();
+        bool allImages = !blocks.isEmpty();
+        for (int block : blocks) {
+            const int flat = flatForBlock(m_currentPage, block);
+            if (flat < 0 || !flatIsImage(flat)) {
+                allImages = false;
+                break;
+            }
+        }
+        if (allImages) {
+            const int flat = flatForBlock(m_currentPage, blocks.first());
+            if (flat >= 0 && copyImage(flat))
+                return 1;
+        }
+    }
+
     const QString text = selectedText();
     if (text.isEmpty())
         return 0;
@@ -692,6 +709,37 @@ int PageView::copySelection()
     }
     emit textCopied(blocks, text.size());
     return blocks;
+}
+
+bool PageView::flatIsImage(int flat) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return false;
+    const FlatBlock &block = m_flat.at(flat);
+    if (block.page < 0 || block.page >= m_pages.size())
+        return false;
+    const PageLayout &page = m_pages.at(block.page);
+    if (block.block < 0 || block.block >= page.blocks.size())
+        return false;
+    return ocr::isImageKind(page.blocks.at(block.block).kind);
+}
+
+QImage PageView::imageForFlat(int flat)
+{
+    if (!m_doc || flat < 0 || flat >= m_flat.size())
+        return {};
+    const FlatBlock &block = m_flat.at(flat);
+    return m_doc->blockImage(block.page, block.block);
+}
+
+bool PageView::copyImage(int flat)
+{
+    const QImage image = imageForFlat(flat);
+    if (image.isNull())
+        return false;
+    QApplication::clipboard()->setImage(image);
+    emit imageCopied();
+    return true;
 }
 
 void PageView::applySelection(const QSet<int> &next, bool notify)
@@ -1098,17 +1146,31 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
 
     QMenu menu(this);
     const int count = m_selection.size();
+    const bool imageHit = hit >= 0 && flatIsImage(hit);
+    QAction *copyImageAction = nullptr;
+    QAction *exportImageAction = nullptr;
+    if (imageHit) {
+        copyImageAction = menu.addAction(theme::icon(QStringLiteral("copy")),
+                                         QStringLiteral("复制图片"));
+        exportImageAction = menu.addAction(QStringLiteral("导出 PNG…"));
+        menu.addSeparator();
+    }
     QAction *copy = menu.addAction(theme::icon(QStringLiteral("copy")),
                                    count > 1
                                        ? QStringLiteral("复制 %1 个块的文本").arg(count)
                                        : QStringLiteral("复制文本"));
-    copy->setEnabled(count > 0);
+    copy->setEnabled(count > 0 && !selectedText().trimmed().isEmpty());
     menu.addSeparator();
     QAction *clear = menu.addAction(QStringLiteral("取消选择"));
     clear->setEnabled(count > 0);
 
     QAction *chosen = menu.exec(event->globalPos());
-    if (chosen == copy) {
+    if (chosen == copyImageAction) {
+        copyImage(hit);
+    } else if (chosen == exportImageAction) {
+        const FlatBlock &block = m_flat.at(hit);
+        emit imageExportRequested(block.page, block.block);
+    } else if (chosen == copy) {
         copySelection();
     } else if (chosen == clear) {
         m_anchor = -1;

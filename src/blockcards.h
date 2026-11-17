@@ -47,6 +47,8 @@ signals:
     void blockActivated(int index);
     void cardsSelectionChanged(const QVector<int> &blocks);
     void copyRequested();
+    void imageCopyRequested(int blockIndex);
+    void imageExportRequested(int blockIndex);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;

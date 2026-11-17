@@ -95,6 +95,8 @@ private:
     QVector<OutlineEntry> outlineForExport() const;
     void copyText();
     void copySelection();
+    bool copyBlockImage(int page, int block);
+    void exportBlockImage(int page, int block);
     void showSelectionStatus();
 
     void syncCardsFromView();

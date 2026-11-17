@@ -128,6 +128,11 @@ QString textOf(const QVector<Block> &blocks, const QVector<int> &indices)
     return parts.join(QLatin1Char('\n'));
 }
 
+bool isImageKind(const QString &kind)
+{
+    return kind == QLatin1String("image") || kind == QLatin1String("figure");
+}
+
 QString kindLabel(const QString &kind)
 {
     if (kind == QLatin1String("title")) return QStringLiteral("标题");
@@ -142,7 +147,7 @@ QString kindLabel(const QString &kind)
     if (kind == QLatin1String("section")) return QStringLiteral("章节");
     if (kind == QLatin1String("abstract")) return QStringLiteral("摘要");
     if (kind.contains(QLatin1String("caption"))) return QStringLiteral("题注");
-    if (kind.contains(QLatin1String("figure")) || kind.contains(QLatin1String("image")))
+    if (isImageKind(kind))
         return QStringLiteral("图片");
     if (kind.contains(QLatin1String("footnote"))) return QStringLiteral("脚注");
     if (kind == QLatin1String("equation")) return QStringLiteral("公式");
