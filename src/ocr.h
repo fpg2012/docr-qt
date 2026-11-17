@@ -36,6 +36,15 @@ QVector<Block> parseBlocks(const QString &text);
 // 拼接可读文本（表格转成 "a | b" 行）。
 QString plainText(const QJsonObject &payload, const QString &purpose);
 
+// 单个块的文本转成可读形式（表格转成 "a | b" 行，HTML 去标签）。
+QString displayText(const QString &raw);
+
+// 按给定顺序拼接若干块的文本，块之间用换行分隔。
+QString textOf(const QVector<Block> &blocks, const QVector<int> &indices);
+
+// 版面块类型的中文名。
+QString kindLabel(const QString &kind);
+
 // 页级输出是否因长度被截断。
 bool isTruncated(const QJsonObject &payload);
 

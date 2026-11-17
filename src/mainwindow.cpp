@@ -5,19 +5,23 @@
 #include <QBuffer>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QCollator>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDockWidget>
 #include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
 #include <QDropEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFormLayout>
-#include <QHeaderView>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -28,15 +32,20 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSpinBox>
-#include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
-#include <QTableWidget>
+#include <QTextStream>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
+#include <QAbstractItemView>
+#include <QPalette>
 
+#include <algorithm>
+
+#include "blockcards.h"
 #include "pageview.h"
 #include "theme.h"
 
@@ -45,16 +54,25 @@ namespace {
 const char *kImageFilter =
     "图片 (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff)";
 
-QString kindLabel(const QString &kind)
+bool hasLocalFiles(const QMimeData *mime)
 {
-    if (kind == QLatin1String("title")) return QStringLiteral("标题");
-    if (kind == QLatin1String("text")) return QStringLiteral("正文");
-    if (kind == QLatin1String("table")) return QStringLiteral("表格");
-    if (kind.contains(QLatin1String("caption"))) return QStringLiteral("题注");
-    if (kind.contains(QLatin1String("figure"))) return QStringLiteral("图片");
-    if (kind.contains(QLatin1String("footnote"))) return QStringLiteral("脚注");
-    if (kind == QLatin1String("equation")) return QStringLiteral("公式");
-    return kind;
+    if (!mime || !mime->hasUrls())
+        return false;
+    for (const QUrl &url : mime->urls()) {
+        if (url.isLocalFile())
+            return true;
+    }
+    return false;
+}
+
+QStringList localPaths(const QMimeData *mime)
+{
+    QStringList paths;
+    for (const QUrl &url : mime->urls()) {
+        if (url.isLocalFile())
+            paths << url.toLocalFile();
+    }
+    return paths;
 }
 
 } // namespace
@@ -66,6 +84,9 @@ MainWindow::MainWindow(QWidget *parent)
     buildUi();
     buildActions();
     applySettings();
+    updatePageNav();
+    updatePanels();
+    updateStats();
 
     m_thumbTimer = new QTimer(this);
     m_thumbTimer->setInterval(15);
@@ -74,6 +95,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_client, &ocr::Client::finished, this, &MainWindow::onResult);
 
     setAcceptDrops(true);
+    qApp->installEventFilter(this);
     resize(1480, 940);
     setWindowIcon(theme::appIcon());
     setWindowTitle(QStringLiteral("docr-qt"));
@@ -100,34 +122,28 @@ void MainWindow::buildUi()
     leftDock->setMinimumWidth(180);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
 
-    // 右侧：文本 / 块 / 原始 JSON
+    // 右侧：文本 / 版面块卡片 / 原始 JSON
     auto *rightDock = new QDockWidget(QStringLiteral("识别结果"), this);
     rightDock->setObjectName(QStringLiteral("resultDock"));
-    auto *tabs = new QTabWidget(rightDock);
+    m_tabs = new QTabWidget(rightDock);
 
-    m_textView = new QPlainTextEdit(tabs);
+    m_textView = new QPlainTextEdit(m_tabs);
     m_textView->setReadOnly(true);
     m_textView->setPlaceholderText(QStringLiteral("识别结果会显示在这里"));
-    tabs->addTab(m_textView, QStringLiteral("文本"));
+    m_textView->setAcceptDrops(false);
+    m_tabs->addTab(m_textView, QStringLiteral("文本"));
 
-    m_blockTable = new QTableWidget(0, 3, tabs);
-    m_blockTable->setHorizontalHeaderLabels(
-        {QStringLiteral("类型"), QStringLiteral("位置"), QStringLiteral("文本")});
-    m_blockTable->horizontalHeader()->setStretchLastSection(true);
-    m_blockTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
-    m_blockTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
-    m_blockTable->verticalHeader()->setVisible(false);
-    m_blockTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_blockTable->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_blockTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    tabs->addTab(m_blockTable, QStringLiteral("版面块"));
+    m_blocks = new BlockCardList(m_tabs);
+    m_blocks->showPlaceholder(QStringLiteral("尚未打开文档"));
+    m_tabs->addTab(m_blocks, QStringLiteral("版面块"));
 
-    m_jsonView = new QPlainTextEdit(tabs);
+    m_jsonView = new QPlainTextEdit(m_tabs);
     m_jsonView->setReadOnly(true);
     m_jsonView->setLineWrapMode(QPlainTextEdit::NoWrap);
-    tabs->addTab(m_jsonView, QStringLiteral("JSON"));
+    m_jsonView->setAcceptDrops(false);
+    m_tabs->addTab(m_jsonView, QStringLiteral("JSON"));
 
-    rightDock->setWidget(tabs);
+    rightDock->setWidget(m_tabs);
     rightDock->setMinimumWidth(340);
     addDockWidget(Qt::RightDockWidgetArea, rightDock);
 
@@ -136,13 +152,13 @@ void MainWindow::buildUi()
     m_progress = new QProgressBar(this);
     m_progress->setMaximumWidth(180);
     m_progress->setVisible(false);
+    m_selLabel = new QLabel(this);
+    m_selLabel->hide();
     m_hintLabel = new QLabel(
-        QStringLiteral("拖入 PDF / 图片或文件夹 · Ctrl+滚轮缩放"), this);
-    QPalette hintPalette = m_hintLabel->palette();
-    hintPalette.setColor(QPalette::WindowText,
-                         palette().color(QPalette::PlaceholderText));
-    m_hintLabel->setPalette(hintPalette);
+        QStringLiteral("拖入 PDF / 图片 / 文件夹 · Ctrl+滚轮缩放 · PgUp/PgDn 翻页"), this);
+    m_hintLabel->setForegroundRole(QPalette::PlaceholderText);
     statusBar()->addWidget(m_statsLabel, 1);
+    statusBar()->addPermanentWidget(m_selLabel);
     statusBar()->addPermanentWidget(m_hintLabel);
     statusBar()->addPermanentWidget(m_progress);
 
@@ -150,11 +166,21 @@ void MainWindow::buildUi()
         if (row >= 0)
             showPage(row);
     });
-    connect(m_blockTable, &QTableWidget::cellClicked, this,
-            [this](int row, int) { m_view->selectBlock(row); });
+    connect(m_view, &PageView::selectionChanged, this, [this] { syncCardsFromView(); });
+    connect(m_view, &PageView::textCopied, this, [this](int blocks, int chars) {
+        statusBar()->showMessage(
+            QStringLiteral("已复制 %1 个块 · %2 字").arg(blocks).arg(chars), 2500);
+    });
+    connect(m_view, &PageView::pageStepRequested, this, [this](int delta) { stepPage(delta); });
     connect(m_view, &PageView::blockClicked, this, [this](int index) {
-        if (index >= 0 && index < m_blockTable->rowCount())
-            m_blockTable->selectRow(index);
+        if (m_view->selection().contains(index))
+            m_blocks->scrollToBlock(index);
+    });
+    connect(m_blocks, &BlockCardList::cardsSelectionChanged, this,
+            [this] { syncViewFromCards(); });
+    connect(m_blocks, &BlockCardList::copyRequested, this, [this] { copySelection(); });
+    connect(m_blocks, &BlockCardList::blockActivated, this, [this](int index) {
+        m_view->ensureBlockVisible(index);
     });
 }
 
@@ -192,6 +218,13 @@ void MainWindow::buildActions()
     QAction *openFolder = make(QStringLiteral("open-folder"), QStringLiteral("打开文件夹"),
                                QKeySequence(), [this] { openDirectory(); });
 
+    QAction *prevPage = make(QStringLiteral("page-prev"), QStringLiteral("上一页"),
+                             QKeySequence(QStringLiteral("Ctrl+PgUp")),
+                             [this] { stepPage(-1); });
+    QAction *nextPage = make(QStringLiteral("page-next"), QStringLiteral("下一页"),
+                             QKeySequence(QStringLiteral("Ctrl+PgDown")),
+                             [this] { stepPage(1); });
+
     QAction *ocrPage = make(QStringLiteral("ocr-page"), QStringLiteral("识别本页"),
                             QKeySequence(QStringLiteral("Ctrl+R")),
                             [this] { startOcrCurrent(); });
@@ -210,8 +243,15 @@ void MainWindow::buildActions()
     showBoxes->setChecked(true);
     showBoxes->setToolTip(QStringLiteral("显示/隐藏版面框"));
     connect(showBoxes, &QAction::toggled, this, [this](bool on) {
+        m_showBoxes = on;
         m_view->setBoxesVisible(on);
     });
+
+    m_textToolAction = make(QStringLiteral("text-select"), QStringLiteral("选中文本"),
+                            QKeySequence(), [this](bool) {});
+    m_textToolAction->setCheckable(true);
+    m_textToolAction->setToolTip(QStringLiteral("选中文本：拖动可连续选块，Ctrl 加选"));
+    connect(m_textToolAction, &QAction::toggled, this, &MainWindow::setTextTool);
 
     QAction *fit = make(QStringLiteral("fit-width"), QStringLiteral("适应宽度"),
                         QKeySequence(Qt::Key_F), [this] { m_view->fitWidth(); });
@@ -220,7 +260,8 @@ void MainWindow::buildActions()
     QAction *zoomOut = make(QStringLiteral("zoom-out"), QStringLiteral("缩小"),
                             QKeySequence::ZoomOut, [this] { m_view->zoomBy(1 / 1.2); });
     QAction *actual = make(QStringLiteral("actual-size"), QStringLiteral("原始大小"),
-                           QKeySequence(), [this] { m_view->resetZoom(); });
+                           QKeySequence(QStringLiteral("Ctrl+0")),
+                           [this] { m_view->resetZoom(); });
     QAction *settings = make(QStringLiteral("settings"), QStringLiteral("设置"),
                              QKeySequence(QStringLiteral("Ctrl+,")),
                              [this] { openSettings(); });
@@ -229,11 +270,29 @@ void MainWindow::buildActions()
     toolbar->addAction(openImage);
     toolbar->addAction(openFolder);
     toolbar->addSeparator();
+    toolbar->addAction(prevPage);
+
+    m_pageSpin = new QSpinBox(toolbar);
+    m_pageSpin->setRange(1, 1);
+    m_pageSpin->setValue(1);
+    m_pageSpin->setKeyboardTracking(false);
+    m_pageSpin->setAlignment(Qt::AlignCenter);
+    m_pageSpin->setFixedWidth(96);
+    m_pageSpin->setSuffix(QStringLiteral(" / 0"));
+    m_pageSpin->setToolTip(QStringLiteral("当前页 / 总页数，可直接输入页码跳转"));
+    toolbar->addWidget(m_pageSpin);
+    connect(m_pageSpin, &QSpinBox::valueChanged, this, [this](int value) {
+        goToPage(value - 1);
+    });
+
+    toolbar->addAction(nextPage);
+    toolbar->addSeparator();
     toolbar->addAction(ocrPage);
     toolbar->addAction(ocrAll);
     toolbar->addAction(stop);
     toolbar->addSeparator();
     toolbar->addAction(showBoxes);
+    toolbar->addAction(m_textToolAction);
 
     auto *purposeSpacer = new QWidget(toolbar);
     purposeSpacer->setFixedWidth(6);
@@ -267,7 +326,11 @@ void MainWindow::buildActions()
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
     fileMenu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
-    fileMenu->addAction(QStringLiteral("复制本页文本"), QKeySequence::Copy, this,
+    fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("复制选中文本"), QKeySequence::Copy, this,
+                        [this] { copySelection(); });
+    fileMenu->addAction(QStringLiteral("复制本页文本"),
+                        QKeySequence(QStringLiteral("Ctrl+Shift+C")), this,
                         [this] { copyText(); });
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
@@ -280,12 +343,16 @@ void MainWindow::buildActions()
     ocrMenu->addAction(settings);
 
     auto *viewMenu = menuBar()->addMenu(QStringLiteral("视图"));
+    viewMenu->addAction(prevPage);
+    viewMenu->addAction(nextPage);
+    viewMenu->addSeparator();
+    viewMenu->addAction(m_textToolAction);
+    viewMenu->addAction(showBoxes);
+    viewMenu->addSeparator();
     viewMenu->addAction(fit);
     viewMenu->addAction(zoomIn);
     viewMenu->addAction(zoomOut);
     viewMenu->addAction(actual);
-    viewMenu->addSeparator();
-    viewMenu->addAction(showBoxes);
 }
 
 void MainWindow::applySettings()
@@ -373,45 +440,93 @@ void MainWindow::openSettings()
 
 bool MainWindow::loadPath(const QString &path)
 {
-    const QFileInfo info(path);
-    if (info.isDir())
-        return m_doc.addImageDir(path) > 0 && (addPagesToUi(), true);
-    if (info.suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0) {
-        QString error;
-        if (!m_doc.openPdf(path, m_dpi, &error)) {
-            QMessageBox::warning(this, QStringLiteral("打开失败"), error);
-            return false;
+    openPaths({path});
+    return m_doc.count() > 0;
+}
+
+void MainWindow::openPaths(const QStringList &paths)
+{
+    QStringList files;
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (info.isDir()) {
+            QDir dir(path);
+            QStringList names = dir.entryList(Document::imageNameFilters(), QDir::Files,
+                                              QDir::NoSort);
+            QCollator collator;
+            collator.setNumericMode(true);
+            std::sort(names.begin(), names.end(),
+                      [&collator](const QString &a, const QString &b) {
+                          return collator.compare(a, b) < 0;
+                      });
+            for (const QString &name : names)
+                files << dir.filePath(name);
+        } else if (info.isFile()) {
+            files << info.absoluteFilePath();
         }
-        addPagesToUi();
-        setWindowTitle(QStringLiteral("docr-qt — %1").arg(info.fileName()));
-        return true;
     }
-    if (m_doc.isPdf() || m_doc.count() == 0)
-        m_doc.clear();
-    QString error;
-    if (!m_doc.addImage(path, &error)) {
-        QMessageBox::warning(this, QStringLiteral("打开失败"), error);
-        return false;
+
+    if (files.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("没有可打开的 PDF / 图片"), 4000);
+        return;
     }
+
+    m_generation++;
+    m_pending.clear();
+    m_running.clear();
+    m_allDoneEmitted = true;
+    if (m_stopAction)
+        m_stopAction->setEnabled(false);
+
+    m_doc.clear();
+    m_pageList->clear();
+    m_view->clearPage();
+    m_pageImage = QImage();
+    m_blocks->setBlocks({});
+    m_textView->clear();
+    m_jsonView->clear();
+
+    QStringList errors;
+    for (const QString &file : files) {
+        QString error;
+        if (QFileInfo(file).suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0) {
+            if (!m_doc.addPdf(file, m_dpi, &error))
+                errors << error;
+        } else if (!m_doc.addImage(file, &error)) {
+            errors << error;
+        }
+    }
+
+    if (m_doc.count() == 0) {
+        QMessageBox::warning(this, QStringLiteral("打开失败"),
+                             errors.isEmpty() ? QStringLiteral("没有可显示的页面")
+                                              : errors.join(QLatin1Char('\n')));
+        setWindowTitle(QStringLiteral("docr-qt"));
+        updatePanels();
+        updatePageNav();
+        updateStats();
+        return;
+    }
+
     addPagesToUi();
-    setWindowTitle(QStringLiteral("docr-qt — %1").arg(info.fileName()));
-    return true;
+    const QString title =
+        files.size() == 1
+            ? QFileInfo(files.first()).fileName()
+            : QStringLiteral("%1 个文件 · %2 页").arg(files.size()).arg(m_doc.count());
+    setWindowTitle(QStringLiteral("docr-qt — %1").arg(title));
+    if (!errors.isEmpty())
+        statusBar()->showMessage(QStringLiteral("有 %1 个文件无法打开").arg(errors.size()), 5000);
 }
 
 void MainWindow::openFiles()
 {
     const QStringList files = QFileDialog::getOpenFileNames(
         this, QStringLiteral("打开 PDF 或图片"), QDir::homePath(),
-        QStringLiteral("支持的格式 (*.pdf *.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff);;PDF (*.pdf);;") + kImageFilter);
+        QStringLiteral("支持的格式 (*.pdf *.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff);;PDF (*.pdf);;")
+            + kImageFilter);
     if (files.isEmpty())
         return;
-    if (files.size() == 1) {
-        loadPath(files.first());
-        return;
-    }
-    m_doc.clear();
-    for (const QString &file : files)
-        loadPath(file);
+    openPaths(files);
 }
 
 void MainWindow::openDirectory()
@@ -419,13 +534,7 @@ void MainWindow::openDirectory()
     const QString dir = QFileDialog::getExistingDirectory(this, QStringLiteral("选择图片序列目录"));
     if (dir.isEmpty())
         return;
-    m_doc.clear();
-    if (m_doc.addImageDir(dir) == 0) {
-        QMessageBox::information(this, QStringLiteral("没有图片"),
-                                 QStringLiteral("该目录下没有支持的图片"));
-        return;
-    }
-    addPagesToUi();
+    openPaths({dir});
 }
 
 void MainWindow::addPagesToUi()
@@ -457,31 +566,54 @@ void MainWindow::ensureThumbs()
     m_thumbTimer->stop();
 }
 
-void MainWindow::resetDocument(const QString &title)
-{
-    m_generation++;
-    m_pending.clear();
-    m_running.clear();
-    m_doc.clear();
-    m_pageList->clear();
-    m_view->clearPage();
-    m_blockTable->setRowCount(0);
-    m_textView->clear();
-    m_jsonView->clear();
-    setWindowTitle(QStringLiteral("docr-qt — %1").arg(title));
-}
-
 void MainWindow::showPage(int index)
 {
     if (index < 0 || index >= m_doc.count())
         return;
     const QImage image = m_doc.ensureImage(index);
+    m_pageImage = image;
     const PageEntry &entry = m_doc.page(index);
-    const QVector<ocr::Block> empty;
     const bool rich = entry.result.ok()
                       && entry.result.purpose == QStringLiteral("rich_layout_recognition");
-    m_view->setPage(image, rich ? entry.result.blocks : empty, true);
+    const QVector<ocr::Block> noBlocks;
+    m_view->setPage(image, rich ? entry.result.blocks : noBlocks, m_showBoxes);
     updatePanels();
+    updatePageNav();
+}
+
+void MainWindow::goToPage(int index)
+{
+    if (m_doc.count() == 0)
+        return;
+    index = qBound(0, index, m_doc.count() - 1);
+    if (m_pageList->currentRow() == index) {
+        showPage(index);
+        return;
+    }
+    m_pageList->setCurrentRow(index);
+    if (auto *item = m_pageList->item(index))
+        m_pageList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+}
+
+void MainWindow::stepPage(int delta)
+{
+    if (m_doc.count() == 0)
+        return;
+    const int current = m_pageList->currentRow();
+    goToPage((current < 0 ? 0 : current) + delta);
+}
+
+void MainWindow::updatePageNav()
+{
+    if (!m_pageSpin)
+        return;
+    const int count = m_doc.count();
+    QSignalBlocker blocker(m_pageSpin);
+    m_pageSpin->setMaximum(qMax(1, count));
+    m_pageSpin->setValue(count > 0 ? m_pageList->currentRow() + 1 : 1);
+    m_pageSpin->setSuffix(count > 0 ? QStringLiteral(" / %1").arg(count)
+                                    : QStringLiteral(" / 0"));
+    m_pageSpin->setEnabled(count > 0);
 }
 
 void MainWindow::updatePanels()
@@ -490,7 +622,9 @@ void MainWindow::updatePanels()
     if (index < 0 || index >= m_doc.count()) {
         m_textView->clear();
         m_jsonView->clear();
-        m_blockTable->setRowCount(0);
+        m_blocks->setBlocks({});
+        m_blocks->showPlaceholder(QStringLiteral("尚未打开文档"));
+        m_selLabel->hide();
         return;
     }
     const PageEntry &entry = m_doc.page(index);
@@ -499,7 +633,11 @@ void MainWindow::updatePanels()
                                      ? QStringLiteral("尚未识别")
                                      : QStringLiteral("识别失败：%1").arg(entry.result.error));
         m_jsonView->clear();
-        m_blockTable->setRowCount(0);
+        m_blocks->setBlocks({});
+        m_blocks->showPlaceholder(entry.result.error.isEmpty()
+                                      ? QStringLiteral("尚未识别\n识别后这里按板块列出结果")
+                                      : QStringLiteral("识别失败\n可以重新识别本页"));
+        m_selLabel->hide();
         return;
     }
 
@@ -507,29 +645,13 @@ void MainWindow::updatePanels()
     m_jsonView->setPlainText(QString::fromUtf8(
         QJsonDocument(entry.result.payload).toJson(QJsonDocument::Indented)));
 
-    const QVector<ocr::Block> &blocks = entry.result.blocks;
-    m_blockTable->setRowCount(blocks.size());
-    for (int i = 0; i < blocks.size(); ++i) {
-        const ocr::Block &block = blocks.at(i);
-        auto *kindItem = new QTableWidgetItem(kindLabel(block.kind));
-        QColor color = ocr::colorForKind(block.kind);
-        kindItem->setForeground(theme::tone(color));
-        m_blockTable->setItem(i, 0, kindItem);
-
-        QString position;
-        if (!block.boxes.isEmpty()) {
-            const QRectF &box = block.boxes.first();
-            position = QStringLiteral("%1,%2 → %3,%4")
-                           .arg(qRound(box.left())).arg(qRound(box.top()))
-                           .arg(qRound(box.right())).arg(qRound(box.bottom()));
-        }
-        m_blockTable->setItem(i, 1, new QTableWidgetItem(position));
-
-        QString text = block.text;
-        text.replace(QLatin1Char('\n'), QLatin1Char(' '));
-        m_blockTable->setItem(i, 2, new QTableWidgetItem(text.left(400)));
-    }
-    m_blockTable->resizeRowsToContents();
+    m_blocks->setBlocks(entry.result.blocks, m_pageImage);
+    if (entry.result.blocks.isEmpty())
+        m_blocks->showPlaceholder(entry.result.purpose
+                                          == QStringLiteral("rich_layout_recognition")
+                                      ? QStringLiteral("本页没有可显示的版面块")
+                                      : QStringLiteral("当前模式只返回纯文本\n改用「版面分析」可得到带坐标的块"));
+    m_selLabel->hide();
 }
 
 void MainWindow::updateStats()
@@ -557,7 +679,7 @@ void MainWindow::updateStats()
     if (failed > 0)
         text += QStringLiteral(" · %1 页失败").arg(failed);
     m_statsLabel->setText(text);
-    m_progress->setVisible(m_pending.size() + m_running.size() > 0);
+    m_progress->setVisible(!m_pending.isEmpty() || !m_running.isEmpty());
     m_progress->setRange(0, qMax(1, m_doc.count()));
     m_progress->setValue(done);
 }
@@ -639,6 +761,7 @@ void MainWindow::encodeAndSubmit(int page)
     QBuffer buffer(&bytes);
     buffer.open(QIODevice::WriteOnly);
     const bool saved = image.save(&buffer, "PNG");
+    Q_UNUSED(saved);
     const QString name = QStringLiteral("page-%1.png").arg(page + 1);
     m_client.submit(page, m_generation, bytes, name, m_purpose);
 }
@@ -730,6 +853,81 @@ void MainWindow::copyText()
     statusBar()->showMessage(QStringLiteral("已复制本页文本"), 2000);
 }
 
+void MainWindow::copySelection()
+{
+    if (auto *edit = qobject_cast<QPlainTextEdit *>(QApplication::focusWidget())) {
+        if (edit->textCursor().hasSelection()) {
+            edit->copy();
+            statusBar()->showMessage(QStringLiteral("已复制所选文字"), 2000);
+            return;
+        }
+    }
+    if (!m_view->selection().isEmpty()) {
+        m_view->copySelection();
+        return;
+    }
+    copyText();
+}
+
+void MainWindow::showSelectionStatus()
+{
+    const QVector<int> selection = m_view->selection();
+    if (selection.isEmpty()) {
+        m_selLabel->hide();
+        return;
+    }
+    m_selLabel->setText(QStringLiteral("已选 %1 个块 · %2 字   ")
+                            .arg(selection.size())
+                            .arg(m_view->selectedText().size()));
+    m_selLabel->show();
+}
+
+void MainWindow::syncCardsFromView()
+{
+    if (m_syncing)
+        return;
+    m_syncing = true;
+    const QVector<int> selection = m_view->selection();
+    m_blocks->setSelectedBlocks(selection);
+    m_syncing = false;
+
+    if (!selection.isEmpty()) {
+        m_tabs->setCurrentWidget(m_blocks);
+        m_blocks->scrollToBlock(selection.first());
+    }
+    showSelectionStatus();
+}
+
+void MainWindow::syncViewFromCards()
+{
+    if (m_syncing)
+        return;
+    const QVector<int> selection = m_blocks->selectedBlocks();
+    m_syncing = true;
+    m_view->setSelection(selection, false);
+    m_syncing = false;
+    if (!selection.isEmpty())
+        m_view->ensureBlockVisible(selection.first());
+    showSelectionStatus();
+}
+
+void MainWindow::setTextTool(bool on)
+{
+    m_view->setTool(on ? PageView::Tool::Text : PageView::Tool::Pointer);
+    if (on)
+        statusBar()->showMessage(
+            QStringLiteral("文本选择：按住左键拖动可连续选块 · Ctrl 加选 · Ctrl+C 复制"), 4000);
+}
+
+void MainWindow::showDropHint(bool on)
+{
+    if (m_dropHint == on)
+        return;
+    m_dropHint = on;
+    if (m_view)
+        m_view->setDropActive(on);
+}
+
 void MainWindow::injectMockResult(const QString &jsonPath)
 {
     QFile file(jsonPath);
@@ -760,27 +958,107 @@ void MainWindow::refreshPageList(int index)
         item->setText(QStringLiteral("%1 ✓").arg(index + 1));
 }
 
+void MainWindow::selectBlocks(const QVector<int> &blocks)
+{
+    m_view->setSelection(blocks);
+    syncCardsFromView();
+    showBlocksTab();
+}
+
+void MainWindow::showBlocksTab()
+{
+    if (m_tabs && m_blocks)
+        m_tabs->setCurrentWidget(m_blocks);
+}
+
+void MainWindow::setDropHintVisible(bool on)
+{
+    showDropHint(on);
+}
+
 void MainWindow::dragEnterEvent(QDragEnterEvent *event)
 {
-    if (event->mimeData()->hasUrls())
-        event->acceptProposedAction();
+    if (!hasLocalFiles(event->mimeData())) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    showDropHint(true);
+}
+
+void MainWindow::dragMoveEvent(QDragMoveEvent *event)
+{
+    if (!hasLocalFiles(event->mimeData())) {
+        event->ignore();
+        return;
+    }
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+}
+
+void MainWindow::dragLeaveEvent(QDragLeaveEvent *event)
+{
+    showDropHint(false);
+    QMainWindow::dragLeaveEvent(event);
 }
 
 void MainWindow::dropEvent(QDropEvent *event)
 {
-    const QList<QUrl> urls = event->mimeData()->urls();
-    if (urls.isEmpty())
-        return;
-    if (urls.size() == 1 && QFileInfo(urls.first().toLocalFile()).isDir()) {
-        m_doc.clear();
-        if (m_doc.addImageDir(urls.first().toLocalFile()) > 0)
-            addPagesToUi();
+    showDropHint(false);
+    const QStringList paths = localPaths(event->mimeData());
+    if (paths.isEmpty()) {
+        event->ignore();
         return;
     }
-    m_doc.clear();
-    for (const QUrl &url : urls)
-        loadPath(url.toLocalFile());
-    event->acceptProposedAction();
+    event->setDropAction(Qt::CopyAction);
+    event->accept();
+    openPaths(paths);
+}
+
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget->window() != this)
+        return QMainWindow::eventFilter(watched, event);
+
+    switch (event->type()) {
+    case QEvent::DragEnter: {
+        auto *drag = static_cast<QDragEnterEvent *>(event);
+        if (!hasLocalFiles(drag->mimeData()))
+            break;
+        drag->setDropAction(Qt::CopyAction);
+        drag->accept();
+        showDropHint(true);
+        return true;
+    }
+    case QEvent::DragMove: {
+        auto *drag = static_cast<QDragMoveEvent *>(event);
+        if (!hasLocalFiles(drag->mimeData()))
+            break;
+        drag->setDropAction(Qt::CopyAction);
+        drag->accept();
+        return true;
+    }
+    case QEvent::DragLeave:
+        showDropHint(false);
+        break;
+    case QEvent::Drop: {
+        auto *drop = static_cast<QDropEvent *>(event);
+        if (!hasLocalFiles(drop->mimeData()))
+            break;
+        showDropHint(false);
+        const QStringList paths = localPaths(drop->mimeData());
+        drop->setDropAction(Qt::CopyAction);
+        drop->accept();
+        if (!paths.isEmpty())
+            openPaths(paths);
+        return true;
+    }
+    default:
+        break;
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
@@ -803,14 +1081,10 @@ void MainWindow::applyTheme()
     for (const auto &entry : m_themedActions)
         entry.first->setIcon(theme::icon(entry.second));
 
-    if (m_hintLabel) {
-        QPalette hintPalette = m_hintLabel->palette();
-        hintPalette.setColor(QPalette::WindowText,
-                             palette().color(QPalette::PlaceholderText));
-        m_hintLabel->setPalette(hintPalette);
-    }
     if (m_view)
         m_view->updateBackground();
+    if (m_blocks)
+        m_blocks->viewport()->update();
 
     m_applyingTheme = false;
 }

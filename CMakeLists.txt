@@ -17,6 +17,7 @@ add_executable(docr-qt
     src/theme.cpp
     src/document.cpp
     src/pageview.cpp
+    src/blockcards.cpp
     src/mainwindow.cpp
     resources.qrc
 )

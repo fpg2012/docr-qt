@@ -4,6 +4,7 @@
 #include <QImage>
 #include <QPixmap>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <memory>
@@ -16,6 +17,7 @@ struct PageEntry {
     QString label;      // 侧栏显示名
     QString sourcePath; // 源 PDF/图片路径
     int pdfPage = -1;   // PDF 内页码（0 起）；图片为 -1
+    std::shared_ptr<Poppler::Document> pdf; // 非空则从该 PDF 渲染本页
     QImage image;       // 渲染结果（按需）
     QPixmap thumb;      // 缩略图
     ocr::PageResult result;
@@ -25,7 +27,8 @@ struct PageEntry {
 
 class Document {
 public:
-    bool openPdf(const QString &path, int dpi, QString *error);
+    // 追加一个 PDF 的全部页面（不清空已有页面）。
+    bool addPdf(const QString &path, int dpi, QString *error);
     bool addImage(const QString &path, QString *error);
     int addImageDir(const QString &dir);
 
@@ -34,7 +37,6 @@ public:
     int dpi() const { return m_dpi; }
     void setDpi(int dpi) { m_dpi = dpi; }
     QString sourcePath() const { return m_path; }
-    bool isPdf() const { return m_pdf != nullptr; }
 
     PageEntry &page(int index) { return m_pages[index]; }
     const PageEntry &page(int index) const { return m_pages[index]; }
@@ -43,10 +45,12 @@ public:
     QImage ensureImage(int index);
     QPixmap ensureThumb(int index);
 
+    // 图片序列可用的后缀（供目录展开与文件对话框复用）。
+    static QStringList imageNameFilters();
+
 private:
     QVector<PageEntry> m_pages;
-    std::unique_ptr<Poppler::Document> m_pdf;
-    QImage renderPdfPage(int pdfPage);
+    QImage renderPdfPage(const std::shared_ptr<Poppler::Document> &pdf, int page);
     int m_dpi = 150;
     QString m_path;
 };

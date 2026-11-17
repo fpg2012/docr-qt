@@ -1,9 +1,8 @@
 #include <QApplication>
 #include <QCommandLineParser>
-#include <QFileInfo>
 #include <QGuiApplication>
-#include <QStyleHints>
 #include <QIcon>
+#include <QStyleHints>
 #include <QTimer>
 
 #include "mainwindow.h"
@@ -21,7 +20,8 @@ int main(int argc, char *argv[])
     parser.setApplicationDescription(QStringLiteral("DeepSeek OCR 图形前端"));
     parser.addHelpOption();
     QCommandLineOption openOption({QStringLiteral("o"), QStringLiteral("open")},
-                                  QStringLiteral("启动时打开 PDF / 图片 / 目录"), QStringLiteral("path"));
+                                  QStringLiteral("启动时打开 PDF / 图片 / 目录（可重复）"),
+                                  QStringLiteral("path"));
     QCommandLineOption ocrOption(QStringLiteral("ocr"), QStringLiteral("启动后立即识别全部页面"));
     QCommandLineOption screenshotOption(QStringLiteral("screenshot"),
                                         QStringLiteral("识别完成后保存窗口截图并退出"),
@@ -32,10 +32,18 @@ int main(int argc, char *argv[])
     QCommandLineOption purposeOption(QStringLiteral("purpose"),
                                      QStringLiteral("rich_layout_recognition | text_recognition"),
                                      QStringLiteral("purpose"));
+    QCommandLineOption selectOption(QStringLiteral("select"),
+                                    QStringLiteral("调试：选中第 1 页的指定版面块（逗号分隔，隐含切到「版面块」页）"),
+                                    QStringLiteral("indices"));
+    QCommandLineOption dropHintOption(QStringLiteral("drop-hint"),
+                                      QStringLiteral("调试：显示拖入提示框"));
+    QCommandLineOption pageOption(QStringLiteral("page"),
+                                  QStringLiteral("调试：启动后跳到指定页（1 起）"),
+                                  QStringLiteral("number"));
     QCommandLineOption darkOption(QStringLiteral("dark"), QStringLiteral("强制深色方案（调试用）"));
     QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
     parser.addOptions({openOption, ocrOption, screenshotOption, mockOption, purposeOption,
-                       darkOption, lightOption});
+                       selectOption, dropHintOption, pageOption, darkOption, lightOption});
     parser.process(app);
 
     if (parser.isSet(darkOption))
@@ -48,32 +56,50 @@ int main(int argc, char *argv[])
     MainWindow window;
     window.show();
 
-    if (parser.isSet(openOption))
-        window.loadPath(parser.value(openOption));
+    const QStringList openPaths = parser.values(openOption);
+    if (!openPaths.isEmpty())
+        window.openPaths(openPaths);
+
+    if (parser.isSet(mockOption))
+        window.injectMockResult(parser.value(mockOption));
+
+    if (parser.isSet(pageOption)) {
+        bool ok = false;
+        const int page = parser.value(pageOption).toInt(&ok);
+        if (ok)
+            window.goToPage(page - 1);
+    }
+
+    if (parser.isSet(selectOption)) {
+        QVector<int> blocks;
+        for (const QString &token : parser.value(selectOption).split(QLatin1Char(','),
+                                                                    Qt::SkipEmptyParts)) {
+            bool ok = false;
+            const int index = token.trimmed().toInt(&ok);
+            if (ok && index >= 0)
+                blocks.append(index);
+        }
+        window.selectBlocks(blocks);
+    }
+    if (parser.isSet(dropHintOption))
+        window.setDropHintVisible(true);
 
     const QString screenshot = parser.value(screenshotOption);
-    if (parser.isSet(mockOption)) {
-        window.injectMockResult(parser.value(mockOption));
-        if (!screenshot.isEmpty()) {
-            QTimer::singleShot(600, &app, [&app, &window, screenshot] {
-                window.grab().save(screenshot);
-                QApplication::quit();
-            });
-        }
-        return app.exec();
-    }
+    auto scheduleShot = [&app, &window, screenshot](int delay) {
+        QTimer::singleShot(delay, &app, [&app, &window, screenshot] {
+            window.grab().save(screenshot);
+            QApplication::quit();
+        });
+    };
 
     if (parser.isSet(ocrOption)) {
         if (!screenshot.isEmpty()) {
             QObject::connect(&window, &MainWindow::allFinished, &app,
-                             [&app, &window, screenshot] {
-                                 QTimer::singleShot(400, &app, [&app, &window, screenshot] {
-                                     window.grab().save(screenshot);
-                                     QApplication::quit();
-                                 });
-                             });
+                             [scheduleShot] { scheduleShot(400); });
         }
         QTimer::singleShot(0, &window, &MainWindow::startOcrAll);
+    } else if (!screenshot.isEmpty()) {
+        scheduleShot(600);
     }
 
     return app.exec();

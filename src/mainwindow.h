@@ -6,6 +6,7 @@
 #include <QPair>
 #include <QQueue>
 #include <QSet>
+#include <QVector>
 
 #include "document.h"
 #include "ocr.h"
@@ -16,8 +17,10 @@ class QLabel;
 class QListWidget;
 class QPlainTextEdit;
 class QProgressBar;
-class QTableWidget;
+class QSpinBox;
+class QTabWidget;
 class QTimer;
+class BlockCardList;
 class PageView;
 
 class MainWindow : public QMainWindow {
@@ -26,10 +29,18 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
 
     bool loadPath(const QString &path);
+    // 打开一组路径（PDF / 图片 / 图片目录，可混合），替换当前文档。
+    void openPaths(const QStringList &paths);
     void startOcrAll();
     void startOcrCurrent();
     void stopOcr();
     void injectMockResult(const QString &jsonPath);
+    // 调试入口：选中当前页的若干版面块。
+    void selectBlocks(const QVector<int> &blocks);
+    void showBlocksTab();
+    // 调试入口：强制显示拖入提示框。
+    void setDropHintVisible(bool on);
+    void goToPage(int index);
 
 signals:
     void allFinished();
@@ -37,9 +48,12 @@ signals:
 
 protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
+    void dragMoveEvent(QDragMoveEvent *event) override;
+    void dragLeaveEvent(QDragLeaveEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
     void changeEvent(QEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void buildUi();
@@ -50,12 +64,13 @@ private:
 
     void openFiles();
     void openDirectory();
-    void resetDocument(const QString &title);
     void addPagesToUi();
     void showPage(int index);
-    void refreshPageList(int index);
+    void stepPage(int delta);
+    void updatePageNav();
     void updatePanels();
     void updateStats();
+    void refreshPageList(int index);
 
     void enqueuePages(const QVector<int> &pages);
     void pumpQueue();
@@ -66,6 +81,13 @@ private:
     void exportMarkdown();
     void exportJson();
     void copyText();
+    void copySelection();
+    void showSelectionStatus();
+
+    void syncCardsFromView();
+    void syncViewFromCards();
+    void setTextTool(bool on);
+    void showDropHint(bool on);
 
     Document m_doc;
     ocr::Client m_client;
@@ -74,13 +96,18 @@ private:
     PageView *m_view = nullptr;
     QPlainTextEdit *m_textView = nullptr;
     QPlainTextEdit *m_jsonView = nullptr;
-    QTableWidget *m_blockTable = nullptr;
+    QTabWidget *m_tabs = nullptr;
+    BlockCardList *m_blocks = nullptr;
     QComboBox *m_purposeBox = nullptr;
+    QSpinBox *m_pageSpin = nullptr;
     QAction *m_stopAction = nullptr;
+    QAction *m_textToolAction = nullptr;
     QLabel *m_statsLabel = nullptr;
     QLabel *m_hintLabel = nullptr;
+    QLabel *m_selLabel = nullptr;
     QProgressBar *m_progress = nullptr;
     QTimer *m_thumbTimer = nullptr;
+    QImage m_pageImage;
     QList<QPair<QAction *, QString>> m_themedActions;
     bool m_applyingTheme = false;
     void applyTheme();
@@ -94,4 +121,7 @@ private:
     QString m_baseUrl;
     QString m_purpose = QStringLiteral("rich_layout_recognition");
     bool m_allDoneEmitted = true;
+    bool m_showBoxes = true;
+    bool m_syncing = false;
+    bool m_dropHint = false;
 };

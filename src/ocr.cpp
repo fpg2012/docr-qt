@@ -108,6 +108,39 @@ QVector<Block> parseBlocks(const QString &text)
     return blocks;
 }
 
+QString displayText(const QString &raw)
+{
+    if (raw.contains(QStringLiteral("<table"), Qt::CaseInsensitive))
+        return tableToLines(raw).trimmed();
+    return stripHtml(raw);
+}
+
+QString textOf(const QVector<Block> &blocks, const QVector<int> &indices)
+{
+    QStringList parts;
+    for (int index : indices) {
+        if (index < 0 || index >= blocks.size())
+            continue;
+        const QString text = displayText(blocks.at(index).text);
+        if (!text.isEmpty())
+            parts << text;
+    }
+    return parts.join(QLatin1Char('\n'));
+}
+
+QString kindLabel(const QString &kind)
+{
+    if (kind == QLatin1String("title")) return QStringLiteral("标题");
+    if (kind == QLatin1String("text")) return QStringLiteral("正文");
+    if (kind == QLatin1String("table")) return QStringLiteral("表格");
+    if (kind.contains(QLatin1String("caption"))) return QStringLiteral("题注");
+    if (kind.contains(QLatin1String("figure")) || kind.contains(QLatin1String("image")))
+        return QStringLiteral("图片");
+    if (kind.contains(QLatin1String("footnote"))) return QStringLiteral("脚注");
+    if (kind == QLatin1String("equation")) return QStringLiteral("公式");
+    return kind;
+}
+
 QString plainText(const QJsonObject &payload, const QString &purpose)
 {
     const QJsonArray pages = payload.value(QStringLiteral("pages")).toArray();
@@ -117,15 +150,9 @@ QString plainText(const QJsonObject &payload, const QString &purpose)
         if (purpose == QStringLiteral("rich_layout_recognition")) {
             QStringList lines;
             for (const Block &block : parseBlocks(text)) {
-                if (block.text.contains(QStringLiteral("<table"), Qt::CaseInsensitive)) {
-                    const QString table = tableToLines(block.text);
-                    if (!table.isEmpty())
-                        lines << table;
-                } else {
-                    const QString plain = stripHtml(block.text);
-                    if (!plain.isEmpty())
-                        lines << plain;
-                }
+                const QString plain = displayText(block.text);
+                if (!plain.isEmpty())
+                    lines << plain;
             }
             text = lines.join(QLatin1Char('\n'));
         }

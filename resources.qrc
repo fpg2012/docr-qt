@@ -7,6 +7,10 @@
     <file alias="ocr-page.svg">assets/icons/ocr-page.svg</file>
     <file alias="ocr-all.svg">assets/icons/ocr-all.svg</file>
     <file alias="stop.svg">assets/icons/stop.svg</file>
+    <file alias="page-prev.svg">assets/icons/page-prev.svg</file>
+    <file alias="page-next.svg">assets/icons/page-next.svg</file>
+    <file alias="text-select.svg">assets/icons/text-select.svg</file>
+    <file alias="copy.svg">assets/icons/copy.svg</file>
     <file alias="boxes.svg">assets/icons/boxes.svg</file>
     <file alias="fit-width.svg">assets/icons/fit-width.svg</file>
     <file alias="zoom-in.svg">assets/icons/zoom-in.svg</file>
