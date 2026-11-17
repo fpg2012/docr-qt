@@ -1,8 +1,10 @@
 #include "pdfexport.h"
 
 #include <QBuffer>
+#include <QCoreApplication>
 #include <QColor>
 #include <QDir>
+#include <QDataStream>
 #include <QFile>
 #include <QFileInfo>
 #include <QFont>
@@ -11,8 +13,10 @@
 #include <QMarginsF>
 #include <QPageSize>
 #include <QPainter>
+#include <QProcess>
 #include <QPdfWriter>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 
@@ -542,11 +546,209 @@ bool pageHasText(const PageEntry &entry)
     return !ocr::plainText(entry.result.payload, entry.result.purpose).trimmed().isEmpty();
 }
 
+bool normalizeOverlayPdf(const QString &path, QString *error)
+{
+    QPDF overlay;
+    try {
+        overlay.processFile(QFile::encodeName(path).constData());
+    } catch (const std::exception &e) {
+        setError(error, QStringLiteral("读取文本层失败：%1").arg(QString::fromUtf8(e.what())));
+        return false;
+    }
+    QPDFPageDocumentHelper helper(overlay);
+    const auto pages = helper.getAllPages();
+    for (QPDFPageObjectHelper page : pages)
+        normalizeFontCMaps(overlay, page);
+
+    const QString temp = path + QStringLiteral(".norm");
+    QFile::remove(temp);
+    try {
+        const QByteArray tempName = QFile::encodeName(temp);
+        QPDFWriter writer(overlay, tempName.constData());
+        writer.setMinimumPDFVersion("1.7");
+        writer.setObjectStreamMode(qpdf_o_preserve);
+        writer.write();
+    } catch (const std::exception &e) {
+        setError(error, QStringLiteral("规范化文本层失败：%1").arg(QString::fromUtf8(e.what())));
+        QFile::remove(temp);
+        return false;
+    }
+    if (QFile::exists(path))
+        QFile::remove(path);
+    if (!QFile::rename(temp, path)) {
+        setError(error, QStringLiteral("无法替换文本层文件"));
+        QFile::remove(temp);
+        return false;
+    }
+    return true;
+}
+
+bool writeOverlayManifest(const QString &path, const QVector<QPair<int, QString>> &overlays,
+                          QString *error)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        setError(error, QStringLiteral("无法创建文本层清单"));
+        return false;
+    }
+    QDataStream out(&file);
+    out.setVersion(QDataStream::Qt_6_0);
+    out.setByteOrder(QDataStream::BigEndian);
+    out.writeRawData("DOCROVL1", 8);
+    out << quint32(overlays.size());
+    for (const auto &overlay : overlays) {
+        const QByteArray name = overlay.second.toUtf8();
+        out << quint32(overlay.first) << quint32(name.size());
+        out.writeRawData(name.constData(), name.size());
+    }
+    if (out.status() != QDataStream::Ok) {
+        setError(error, QStringLiteral("写入文本层清单失败"));
+        return false;
+    }
+    return true;
+}
+
+bool writeOutlineManifest(const QString &path, const QVector<OutlineEntry> &outline,
+                          QString *error)
+{
+    struct FlatEntry {
+        qint32 page;
+        quint32 level;
+        QByteArray title;
+    };
+    QVector<FlatEntry> flat;
+    std::function<void(const QVector<OutlineEntry> &, quint32)> walk =
+        [&](const QVector<OutlineEntry> &entries, quint32 level) {
+            for (const OutlineEntry &entry : entries) {
+                flat.append({qint32(entry.page), level, entry.title.toUtf8()});
+                if (!entry.children.isEmpty())
+                    walk(entry.children, level + 1);
+            }
+        };
+    walk(outline, 0);
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        setError(error, QStringLiteral("无法创建大纲清单"));
+        return false;
+    }
+    QDataStream out(&file);
+    out.setVersion(QDataStream::Qt_6_0);
+    out.setByteOrder(QDataStream::BigEndian);
+    out.writeRawData("DOCROUT1", 8);
+    out << quint32(flat.size());
+    for (const FlatEntry &entry : flat) {
+        out << entry.page << entry.level << quint32(entry.title.size());
+        out.writeRawData(entry.title.constData(), entry.title.size());
+    }
+    if (out.status() != QDataStream::Ok) {
+        setError(error, QStringLiteral("写入大纲清单失败"));
+        return false;
+    }
+    return true;
+}
+
+QString pindfAppendPath()
+{
+#ifdef Q_OS_WIN
+    const QString suffix = QStringLiteral(".exe");
+#else
+    const QString suffix;
+#endif
+    const QString local = QCoreApplication::applicationDirPath()
+                          + QStringLiteral("/pindf-append") + suffix;
+    if (QFileInfo::exists(local))
+        return local;
+    return QStandardPaths::findExecutable(QStringLiteral("pindf-append"));
+}
+
+bool runPindfAppend(const QString &helper, const QString &input, const QString &output,
+                    const QString &overlayManifest, const QString &outlineManifest,
+                    QString *error)
+{
+    QProcess process;
+    process.setProgram(helper);
+    process.setArguments({QStringLiteral("--input"), input, QStringLiteral("--output"), output,
+                          QStringLiteral("--overlays"), overlayManifest,
+                          QStringLiteral("--outline"), outlineManifest});
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.start();
+    if (!process.waitForStarted(5000)) {
+        setError(error, QStringLiteral("无法启动 pindf-append"));
+        return false;
+    }
+    while (process.state() != QProcess::NotRunning) {
+        if (!process.waitForFinished(100))
+            QCoreApplication::processEvents();
+    }
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
+        const QString log = QString::fromLocal8Bit(process.readAll()).trimmed();
+        setError(error, log.isEmpty() ? QStringLiteral("pindf-append 执行失败") : log);
+        return false;
+    }
+    if (!QFileInfo::exists(output) || QFileInfo(output).size() == 0) {
+        setError(error, QStringLiteral("pindf-append 没有生成文件"));
+        return false;
+    }
+    return true;
+}
+
+enum class IncrementalResult { Done, Unsupported, Failed, Cancelled };
+
+IncrementalResult tryWriteIncremental(Document &doc, const QVector<OutlineEntry> &outline,
+                                      const QString &outputPath, const QString &workDir,
+                                      QString *error, const Progress &progress)
+{
+    if (doc.count() == 0)
+        return IncrementalResult::Unsupported;
+    const QString source = doc.page(0).sourcePath;
+    if (source.isEmpty() || !QFileInfo(source).isFile())
+        return IncrementalResult::Unsupported;
+    for (int i = 0; i < doc.count(); ++i) {
+        const PageEntry &entry = doc.page(i);
+        if (!entry.pdf || entry.sourcePath != source || entry.pdfPage != i)
+            return IncrementalResult::Unsupported;
+    }
+
+    const QString helper = pindfAppendPath();
+    if (helper.isEmpty())
+        return IncrementalResult::Unsupported;
+
+    const QDir work(workDir);
+    QVector<QPair<int, QString>> overlays;
+    for (int i = 0; i < doc.count(); ++i) {
+        const PageEntry &entry = doc.page(i);
+        if (pageHasText(entry)) {
+            const QString overlayPath = work.filePath(QStringLiteral("overlay-%1.pdf").arg(i));
+            if (!writeOverlay(entry, entry.pdfSize, overlayPath, error))
+                return IncrementalResult::Failed;
+            if (!normalizeOverlayPdf(overlayPath, error))
+                return IncrementalResult::Failed;
+            overlays.append({i, overlayPath});
+        }
+        if (progress && !progress(i + 1, doc.count()))
+            return IncrementalResult::Cancelled;
+    }
+
+    const QString overlayManifest = work.filePath(QStringLiteral("overlays.bin"));
+    const QString outlineManifest = work.filePath(QStringLiteral("outline.bin"));
+    if (!writeOverlayManifest(overlayManifest, overlays, error))
+        return IncrementalResult::Failed;
+    if (!writeOutlineManifest(outlineManifest, outline, error))
+        return IncrementalResult::Failed;
+    if (!runPindfAppend(helper, source, outputPath, overlayManifest, outlineManifest, error))
+        return IncrementalResult::Failed;
+    return IncrementalResult::Done;
+}
+
 } // namespace
 
 bool writeSearchablePdf(Document &doc, const QVector<OutlineEntry> &outline,
-                        const QString &path, QString *error, const Progress &progress)
+                        const QString &path, QString *error, const Progress &progress,
+                        bool *incremental)
 {
+    if (incremental)
+        *incremental = false;
     QString localError;
     if (!error)
         error = &localError;
@@ -583,7 +785,22 @@ bool writeSearchablePdf(Document &doc, const QVector<OutlineEntry> &outline,
     output.close();
 
     bool ok = false;
-    try {
+    const IncrementalResult incrementalResult =
+        tryWriteIncremental(doc, outline, outputPath, overlays.path(), error, progress);
+    if (incrementalResult == IncrementalResult::Cancelled) {
+        setError(error, QStringLiteral("已取消"));
+        QFile::remove(outputPath);
+        return false;
+    }
+    if (incrementalResult == IncrementalResult::Done) {
+        ok = true;
+        if (incremental)
+            *incremental = true;
+    } else {
+        error->clear();
+    }
+
+    if (!ok) try {
         QPDF out;
         out.emptyPDF();
         QPDFPageDocumentHelper outHelper(out);

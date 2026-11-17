@@ -1465,13 +1465,14 @@ void MainWindow::exportSearchablePdf()
     progress.show();
 
     QString error;
+    bool incremental = false;
     const bool ok = pdfexport::writeSearchablePdf(
         m_doc, outlineForExport(), path, &error, [&](int done, int total) {
             progress.setMaximum(total);
             progress.setValue(done);
             QCoreApplication::processEvents();
             return !progress.wasCanceled();
-        });
+        }, &incremental);
     progress.close();
 
     if (!ok) {
@@ -1483,7 +1484,10 @@ void MainWindow::exportSearchablePdf()
         }
         return;
     }
-    statusBar()->showMessage(QStringLiteral("已导出可搜索 PDF：%1").arg(path), 8000);
+    statusBar()->showMessage(
+        incremental ? QStringLiteral("已增量导出可搜索 PDF：%1").arg(path)
+                    : QStringLiteral("已导出可搜索 PDF（完整重写）：%1").arg(path),
+        8000);
 }
 
 void MainWindow::copyText()

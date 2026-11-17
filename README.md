@@ -15,19 +15,20 @@ Markdown。
 
 - Qt 6：Widgets、Network、Gui、Svg
 - poppler-qt6 开发包
-- qpdf（PDF 文本层与大纲写入）
+- qpdf（overlay 规范化与混排文档 fallback）
+- Rust / Cargo（增量写入 helper；pindf 已放在 `vendor/pindf`）
 - CMake ≥ 3.21，支持 C++20 的编译器
 
 Arch Linux：
 
 ```bash
-sudo pacman -S --needed base-devel cmake pkgconf qt6-base qt6-svg poppler-qt6 qpdf
+sudo pacman -S --needed base-devel cmake pkgconf qt6-base qt6-svg poppler-qt6 qpdf rust
 ```
 
 Debian / Ubuntu：
 
 ```bash
-sudo apt install qt6-base-dev libqt6svg6-dev libpoppler-qt6-dev libqpdf-dev cmake g++
+sudo apt install qt6-base-dev libqt6svg6-dev libpoppler-qt6-dev libqpdf-dev cmake g++ cargo rustc
 ```
 
 Windows：使用 [MSYS2](https://www.msys2.org/) 的 UCRT64 环境。项目通过 pkg-config 查找
@@ -37,7 +38,8 @@ poppler-qt6，因此需要在 UCRT64 shell 中安装依赖并构建：
 pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
   mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
   mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg \
-  mingw-w64-ucrt-x86_64-poppler-qt6 mingw-w64-ucrt-x86_64-qpdf
+  mingw-w64-ucrt-x86_64-poppler-qt6 mingw-w64-ucrt-x86_64-qpdf \
+  mingw-w64-ucrt-x86_64-rust
 ```
 
 **构建**
@@ -91,7 +93,8 @@ Windows（在同一个 UCRT64 shell 中）：
 ```
 
 识别完成后，用「文件 → 导出可搜索 PDF…」可以生成保留原页面、带不可见文本层和当前大纲的
-PDF。导出使用 qpdf 完整重写文件；PDF 本身支持增量更新，但 qpdf 目前不提供增量写入接口。
+PDF。单个 PDF 会通过 `pindf-append` 走真正的增量更新：原文件字节保持不变，只在末尾追加
+新对象、xref 和 trailer。图片、多个 PDF 混排或带 `/Rotate` 的页面会回退到 qpdf 完整重建。
 
 Windows 下把命令中的 `docr-cli` 换成 `docr-cli.exe`。在 UCRT64 shell 中运行时会自动找到
 Qt 和 poppler 的 DLL；若要脱离 MSYS2 分发，需要将相关 DLL 与 exe 放在一起，可先用
@@ -117,7 +120,7 @@ src/
 │   ├── ocr.*              # OCR 客户端、multipart 组包、标记解析
 │   ├── ocrqueue.*         # 并发队列、取消、空结果重试
 │   ├── exporters.*        # Markdown / JSON 导出
-│   ├── pdfexport.*        # 可搜索 PDF：文本层、qpdf 页面合并与大纲
+│   ├── pdfexport.*        # 可搜索 PDF：文本层、增量写入与 qpdf fallback
 │   ├── unicodenormalize.* # PDF 文本层的 CJK 字符归一化
 │   ├── ocrdiagnostics.*   # 空结果诊断落盘
 │   └── tocparser.*        # 从 OCR 目录页解析标题与页码
@@ -129,9 +132,14 @@ src/
 ├── main.cpp
 └── cli/
     └── main.cpp           # docr-cli 入口
+tools/
+└── pindf-append/          # Rust helper：导入 overlay、改页面、写大纲
+vendor/
+└── pindf/                 # pindf（Rust）源码，Apache-2.0
 assets/                    # SVG 图标与 desktop 文件
 CMakeLists.txt
 ```
 
 `src/core` 只依赖 Qt Core/Gui/Network、poppler-qt6 和 qpdf，不依赖 Widgets；GUI 和 CLI 都链接
-同一个 `docr-core` 静态库。
+同一个 `docr-core` 静态库。`pindf-append` 由 CMake 调用 Cargo 构建，运行时从程序同目录或
+`PATH` 查找。

@@ -14,9 +14,9 @@ namespace pdfexport {
 using Progress = std::function<bool(int done, int total)>;
 
 // outline 使用拼接文档的全局页下标；page < 0 的节点只作为分组，不写目标页。
-// 输出会重写整个 PDF（qpdf 不支持增量写入），但不重新栅格化原始 PDF 页面。
+// 单个 PDF 优先通过 pindf 增量追加；图片/混排/旋转页回退到 qpdf 完整重写。
 bool writeSearchablePdf(Document &doc, const QVector<OutlineEntry> &outline,
                         const QString &path, QString *error = nullptr,
-                        const Progress &progress = {});
+                        const Progress &progress = {}, bool *incremental = nullptr);
 
 } // namespace pdfexport

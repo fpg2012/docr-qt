@@ -1,0 +1,17 @@
+[package]
+name = "pindf"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A small PDF parsing and incremental-update library (Rust port of libpindf)"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["pdf", "parser"]
+categories = ["parser-implementations"]
+
+[dependencies]
+flate2 = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1

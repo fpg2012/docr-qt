@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt VERSION 0.5.1 LANGUAGES CXX)
+project(docr-qt VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,6 +8,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Widgets)
 find_package(qpdf REQUIRED)
+find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
 pkg_check_modules(QT6SVG REQUIRED IMPORTED_TARGET Qt6Svg)
@@ -33,6 +34,29 @@ target_link_libraries(docr-core PUBLIC
     qpdf::libqpdf
 )
 
+# pindf 增量写入 helper（Rust）。产物与 docr-qt 放在同一目录，便于运行时查找。
+file(GLOB_RECURSE PINDF_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor/pindf/src/*.rs
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/pindf-append/src/*.rs)
+set(PINDF_CARGO_TARGET_DIR ${CMAKE_BINARY_DIR}/pindf-target)
+set(PINDF_APPEND_BIN ${CMAKE_BINARY_DIR}/pindf-append${CMAKE_EXECUTABLE_SUFFIX})
+add_custom_command(
+    OUTPUT ${PINDF_APPEND_BIN}
+    COMMAND ${CMAKE_COMMAND} -E env CARGO_TARGET_DIR=${PINDF_CARGO_TARGET_DIR}
+            ${CARGO_EXECUTABLE} build --release --locked
+            --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/tools/pindf-append/Cargo.toml
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            ${PINDF_CARGO_TARGET_DIR}/release/pindf-append${CMAKE_EXECUTABLE_SUFFIX}
+            ${PINDF_APPEND_BIN}
+    DEPENDS ${PINDF_SOURCES}
+            ${CMAKE_CURRENT_SOURCE_DIR}/vendor/pindf/Cargo.toml
+            ${CMAKE_CURRENT_SOURCE_DIR}/vendor/pindf/Cargo.lock
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/pindf-append/Cargo.toml
+            ${CMAKE_CURRENT_SOURCE_DIR}/tools/pindf-append/Cargo.lock
+    COMMENT "Building pindf-append (Rust)"
+    VERBATIM)
+add_custom_target(pindf-append-build ALL DEPENDS ${PINDF_APPEND_BIN})
+
 add_executable(docr-qt
     src/main.cpp
     src/theme.cpp
@@ -48,6 +72,8 @@ target_link_libraries(docr-qt PRIVATE
     PkgConfig::QT6SVG
 )
 
+add_dependencies(docr-qt pindf-append-build)
+
 add_executable(docr-cli
     src/cli/main.cpp
 )
@@ -57,5 +83,6 @@ target_link_libraries(docr-cli PRIVATE
 )
 
 install(TARGETS docr-qt docr-cli RUNTIME DESTINATION bin)
+install(PROGRAMS ${PINDF_APPEND_BIN} DESTINATION bin)
 install(FILES assets/app.svg DESTINATION share/icons/hicolor/scalable/apps RENAME docr-qt.svg)
 install(FILES assets/docr-qt.desktop DESTINATION share/applications)
