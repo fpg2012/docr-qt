@@ -197,6 +197,10 @@ void MainWindow::buildUi()
     m_outlineTree->setSelectionMode(QAbstractItemView::SingleSelection);
     m_outlineTree->setToolTip(QStringLiteral("点击大纲条目跳转到对应页"));
     outlineLayout->addWidget(m_outlineTree, 1);
+    m_replaceOutline = new QCheckBox(QStringLiteral("用 OCR 目录替换内置大纲"), outlineTab);
+    m_replaceOutline->setToolTip(
+        QStringLiteral("只在同时存在内置书签和 OCR 目录时生效；勾选后隐藏内置书签"));
+    outlineLayout->addWidget(m_replaceOutline);
     m_tocButton = new QPushButton(QStringLiteral("从目录页生成…"), outlineTab);
     m_tocButton->setToolTip(
         QStringLiteral("OCR 目录页，解析「标题 + 页码」，再映射到 PDF 实际页"));
@@ -256,6 +260,10 @@ void MainWindow::buildUi()
                     goToPage(page);
             });
     connect(m_tocButton, &QPushButton::clicked, this, &MainWindow::generateOutlineFromToc);
+    connect(m_replaceOutline, &QCheckBox::toggled, this, [this](bool on) {
+        QSettings().setValue(QStringLiteral("replaceOutlineWithOcr"), on);
+        rebuildOutline();
+    });
     connect(m_pageList, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0 || m_syncingPage)
             return;
@@ -498,6 +506,11 @@ void MainWindow::applySettings()
                                QStringLiteral("rich_layout_recognition")).toString();
     m_doc.setDpi(m_dpi);
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
+    if (m_replaceOutline) {
+        QSignalBlocker blocker(m_replaceOutline);
+        m_replaceOutline->setChecked(
+            settings.value(QStringLiteral("replaceOutlineWithOcr"), false).toBool());
+    }
     if (m_purposeBox) {
         const int index = m_purposeBox->findData(m_purpose);
         if (index >= 0) {
@@ -505,6 +518,8 @@ void MainWindow::applySettings()
             m_purposeBox->setCurrentIndex(index);
         }
     }
+    if (m_replaceOutline)
+        rebuildOutline();
 }
 
 void MainWindow::saveSettings()
@@ -516,6 +531,9 @@ void MainWindow::saveSettings()
     settings.setValue(QStringLiteral("purpose"), m_purpose);
     if (settings.value(QStringLiteral("rememberKey"), false).toBool())
         settings.setValue(QStringLiteral("apiKey"), m_apiKey);
+    if (m_replaceOutline)
+        settings.setValue(QStringLiteral("replaceOutlineWithOcr"),
+                          m_replaceOutline->isChecked());
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
     m_doc.setDpi(m_dpi);
 }
@@ -684,13 +702,20 @@ void MainWindow::rebuildOutline()
     m_outlineTree->clear();
 
     const QVector<OutlineEntry> &builtin = m_doc.outline();
-    appendOutlineItems(nullptr, builtin);
+    const bool hasBoth = !builtin.isEmpty() && !m_ocrOutline.isEmpty();
+    const bool replace = hasBoth && m_replaceOutline && m_replaceOutline->isChecked();
+    if (!replace)
+        appendOutlineItems(nullptr, builtin);
     if (!m_ocrOutline.isEmpty()) {
-        auto *root = new QTreeWidgetItem(m_outlineTree);
-        root->setText(0, QStringLiteral("OCR 目录"));
-        root->setFirstColumnSpanned(true);
-        appendOutlineItems(root, m_ocrOutline);
-        root->setExpanded(true);
+        if (replace) {
+            appendOutlineItems(nullptr, m_ocrOutline);
+        } else {
+            auto *root = new QTreeWidgetItem(m_outlineTree);
+            root->setText(0, QStringLiteral("OCR 目录"));
+            root->setFirstColumnSpanned(true);
+            appendOutlineItems(root, m_ocrOutline);
+            root->setExpanded(true);
+        }
     }
 
     if (m_outlineTree->topLevelItemCount() == 0) {
@@ -710,6 +735,8 @@ void MainWindow::rebuildOutline()
     m_tocButton->setEnabled(m_doc.count() > 0 && !m_tocJob.active);
     m_tocButton->setText(m_tocJob.active ? QStringLiteral("正在识别目录页…")
                                          : QStringLiteral("从目录页生成…"));
+    if (m_replaceOutline)
+        m_replaceOutline->setEnabled(hasBoth);
     if (!builtin.isEmpty() || !m_ocrOutline.isEmpty())
         m_leftTabs->setCurrentIndex(1);
     else

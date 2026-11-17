@@ -22,6 +22,7 @@ class QTabWidget;
 class QTreeWidget;
 class QTreeWidgetItem;
 class QPushButton;
+class QCheckBox;
 class QTimer;
 class BlockCardList;
 class PageView;
@@ -106,6 +107,7 @@ private:
     QListWidget *m_pageList = nullptr;
     QTreeWidget *m_outlineTree = nullptr;
     QPushButton *m_tocButton = nullptr;
+    QCheckBox *m_replaceOutline = nullptr;
     PageView *m_view = nullptr;
     QPlainTextEdit *m_textView = nullptr;
     QPlainTextEdit *m_jsonView = nullptr;
