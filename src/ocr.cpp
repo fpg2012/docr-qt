@@ -133,6 +133,14 @@ QString kindLabel(const QString &kind)
     if (kind == QLatin1String("title")) return QStringLiteral("标题");
     if (kind == QLatin1String("text")) return QStringLiteral("正文");
     if (kind == QLatin1String("table")) return QStringLiteral("表格");
+    if (kind.contains(QLatin1String("page_number"))
+        || kind.contains(QLatin1String("page_footer")))
+        return QStringLiteral("页码");
+    if (kind == QLatin1String("header")) return QStringLiteral("页眉");
+    if (kind == QLatin1String("footer")) return QStringLiteral("页脚");
+    if (kind == QLatin1String("list")) return QStringLiteral("列表");
+    if (kind == QLatin1String("section")) return QStringLiteral("章节");
+    if (kind == QLatin1String("abstract")) return QStringLiteral("摘要");
     if (kind.contains(QLatin1String("caption"))) return QStringLiteral("题注");
     if (kind.contains(QLatin1String("figure")) || kind.contains(QLatin1String("image")))
         return QStringLiteral("图片");

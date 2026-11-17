@@ -1,19 +1,21 @@
 #include "blockcards.h"
 
 #include <QAbstractItemView>
-#include <QItemSelectionModel>
-#include <QResizeEvent>
-#include <QSet>
-#include <QStyle>
 #include <QContextMenuEvent>
 #include <QFontMetrics>
+#include <QItemSelectionModel>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMenu>
 #include <QPainter>
+#include <QResizeEvent>
 #include <QPixmap>
+#include <QScrollBar>
+#include <QSet>
+#include <QStyle>
 #include <QTextLayout>
 #include <QTextOption>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -21,44 +23,88 @@
 
 namespace {
 
-constexpr int kCardHeight = 58;
-constexpr int kImageCardHeight = 156;
+constexpr int kMinCardHeight = 58;
+constexpr int kMinImageCardHeight = 156;
+constexpr int kMarginX = 6;
+constexpr int kMarginY = 2;
+constexpr int kPadding = 8;
+constexpr int kHeaderTop = 5;
+constexpr int kHeaderGap = 1;
+constexpr int kBodyBottom = 3;
 
-// 用 QTextLayout 手动折两行，最后一行截断加省略号。
-void drawPreview(QPainter *painter, const QRect &rect, const QString &text, int maxLines)
+QFont cardLabelFont(const QFont &base)
 {
-    if (text.isEmpty())
-        return;
-    const QFontMetrics metrics(painter->font());
-    const int lineHeight = metrics.lineSpacing();
+    QFont font = base;
+    font.setPointSizeF(base.pointSizeF() * 0.82);
+    font.setBold(true);
+    return font;
+}
 
+QFont cardBodyFont(const QFont &base)
+{
+    QFont font = base;
+    font.setPointSizeF(base.pointSizeF() * 0.92);
+    return font;
+}
+
+int textWidthFor(int cardWidth)
+{
+    return qMax(20, cardWidth - 2 * kMarginX - 2 * kPadding);
+}
+
+int countLines(const QFont &font, int width, const QString &text)
+{
+    if (text.isEmpty() || width <= 0)
+        return 0;
+    QTextLayout layout(text, font);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    int lines = 0;
+    while (true) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(width);
+        ++lines;
+    }
+    layout.endLayout();
+    return lines;
+}
+
+void drawAllLines(QPainter *painter, const QRect &rect, const QString &text)
+{
+    if (text.isEmpty() || rect.height() <= 0 || rect.width() <= 0)
+        return;
     QTextLayout layout(text, painter->font());
     QTextOption option;
     option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
     layout.setTextOption(option);
     layout.beginLayout();
-    QVector<QTextLine> lines;
-    while (lines.size() < maxLines) {
+    const int lineHeight = QFontMetrics(painter->font()).lineSpacing();
+    int y = rect.top();
+    while (true) {
         QTextLine line = layout.createLine();
         if (!line.isValid())
             break;
         line.setLineWidth(rect.width());
-        lines.append(line);
+        line.setPosition(QPointF(rect.left(), y));
+        line.draw(painter, QPointF(0, 0));
+        y += lineHeight;
     }
     layout.endLayout();
+}
 
-    for (int i = 0; i < lines.size(); ++i) {
-        const QTextLine &line = lines.at(i);
-        QString content = text.mid(line.textStart(), line.textLength());
-        const bool last = i == lines.size() - 1;
-        const int consumed = line.textStart() + line.textLength();
-        if (last && consumed < text.size())
-            content = metrics.elidedText(text.mid(line.textStart()), Qt::ElideRight,
-                                         rect.width());
-        painter->drawText(QRect(rect.left(), rect.top() + i * lineHeight, rect.width(),
-                                lineHeight),
-                          Qt::AlignLeft | Qt::AlignVCenter, content.trimmed());
-    }
+int cardHeight(const QFont &base, const QString &text, int width, bool hasImage)
+{
+    const int header = QFontMetrics(cardLabelFont(base)).height();
+    if (hasImage)
+        return qMax(kMinImageCardHeight, header + 140);
+    const int lines = countLines(cardBodyFont(base), textWidthFor(width), text);
+    const int lineHeight = QFontMetrics(cardBodyFont(base)).lineSpacing();
+    const int height = header + lines * lineHeight + 15;
+    return qMax(kMinCardHeight, height);
 }
 
 } // namespace
@@ -68,20 +114,30 @@ BlockCardDelegate::BlockCardDelegate(QObject *parent)
 {
 }
 
+int BlockCardDelegate::heightFor(const QModelIndex &index, const QFont &font, int width) const
+{
+    const bool hasImage = !index.data(BlockPixmapRole).value<QPixmap>().isNull();
+    return cardHeight(font, index.data(BlockTextRole).toString(), width, hasImage);
+}
+
 QSize BlockCardDelegate::sizeHint(const QStyleOptionViewItem &option,
                                   const QModelIndex &index) const
 {
-    const bool hasImage = !index.data(BlockPixmapRole).value<QPixmap>().isNull();
-    return QSize(qMax(180, option.rect.width()), hasImage ? kImageCardHeight : kCardHeight);
+    int width = option.rect.width();
+    if (auto *view = qobject_cast<QAbstractItemView *>(parent()))
+        width = view->viewport()->width();
+    width = qMax(180, width);
+    return QSize(width, heightFor(index, option.font, width));
 }
 
 void BlockCardDelegate::paint(QPainter *painter, const QStyleOptionViewItem &option,
                               const QModelIndex &index) const
 {
     painter->save();
+    painter->setClipRect(option.rect);
     painter->setRenderHint(QPainter::Antialiasing, true);
     painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
-    const QRect outer = option.rect.adjusted(6, 2, -6, -2);
+    const QRect outer = option.rect.adjusted(kMarginX, kMarginY, -kMarginX, -kMarginY);
     if (outer.width() <= 0)
         return;
 
@@ -121,17 +177,13 @@ void BlockCardDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
     const QPixmap pixmap = index.data(BlockPixmapRole).value<QPixmap>();
     const bool hasImage = !pixmap.isNull();
 
-    QFont labelFont = option.font;
-    labelFont.setPointSizeF(option.font.pointSizeF() * 0.82);
-    labelFont.setBold(true);
-    QFont bodyFont = option.font;
-    bodyFont.setPointSizeF(option.font.pointSizeF() * 0.92);
+    const QFont labelFont = cardLabelFont(option.font);
+    const QFont bodyFont = cardBodyFont(option.font);
     const QFontMetrics labelMetrics(labelFont);
 
-    const int padding = 8;
-    const int textLeft = outer.left() + padding;
-    const int textRight = outer.right() - padding;
-    const int labelTop = outer.top() + 5;
+    const int textLeft = outer.left() + kPadding;
+    const int textRight = outer.right() - kPadding;
+    const int labelTop = outer.top() + kHeaderTop;
 
     painter->setFont(labelFont);
     painter->setPen(accent);
@@ -144,11 +196,12 @@ void BlockCardDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
                       Qt::AlignRight | Qt::AlignVCenter,
                       QStringLiteral("#%1").arg(index.row() + 1));
 
+    const int bodyTop = labelTop + labelMetrics.height() + kHeaderGap;
     if (hasImage) {
         // 图片卡片：让裁剪出的页面区域占据卡片主体，等比缩放居中。
-        const QRect imageArea(outer.left() + padding, labelTop + labelMetrics.height() + 4,
-                              outer.width() - padding * 2,
-                              outer.bottom() - 6 - (labelTop + labelMetrics.height() + 4));
+        const QRect imageArea(outer.left() + kPadding, bodyTop,
+                              outer.width() - kPadding * 2,
+                              outer.bottom() - 6 - bodyTop);
         const QSize target = pixmap.size().scaled(imageArea.size(), Qt::KeepAspectRatio);
         const QRect targetRect(imageArea.center().x() - target.width() / 2,
                                imageArea.center().y() - target.height() / 2,
@@ -165,10 +218,9 @@ void BlockCardDelegate::paint(QPainter *painter, const QStyleOptionViewItem &opt
     if (!text.isEmpty()) {
         painter->setFont(bodyFont);
         painter->setPen(option.palette.color(QPalette::Text));
-        const QRect bodyRect(textLeft, labelTop + labelMetrics.height() + 1,
-                             textRight - textLeft,
-                             outer.bottom() - 3 - (labelTop + labelMetrics.height() + 1));
-        drawPreview(painter, bodyRect, text, 2);
+        const QRect bodyRect(textLeft, bodyTop, textRight - textLeft,
+                             outer.bottom() - kBodyBottom - bodyTop);
+        drawAllLines(painter, bodyRect, text);
     }
 
     painter->restore();
@@ -203,6 +255,10 @@ BlockCardList::BlockCardList(QWidget *parent)
     connect(this, &QListWidget::itemSelectionChanged, this, [this] {
         if (!m_updating)
             emit cardsSelectionChanged(selectedBlocks());
+    });
+    // 滚动条出现/消失会改变正文宽度，需要重新折行和计算高度。
+    connect(verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int, int) {
+        scheduleRelayout();
     });
 }
 
@@ -245,6 +301,8 @@ void BlockCardList::setBlocks(const QVector<ocr::Block> &blocks, const QImage &p
         item->setToolTip(text);
     }
     m_updating = false;
+    m_layoutWidth = -1;
+    scheduleRelayout();
     m_empty->setVisible(blocks.isEmpty());
     m_empty->raise();
 }
@@ -288,10 +346,49 @@ void BlockCardList::scrollToBlock(int index)
     scrollToItem(item(index), QAbstractItemView::PositionAtCenter);
 }
 
+void BlockCardList::relayout()
+{
+    const int width = viewport()->width();
+    if (width <= 0 || width == m_layoutWidth)
+        return;
+    auto *delegate = qobject_cast<BlockCardDelegate *>(itemDelegate());
+    if (!delegate)
+        return;
+
+    m_layoutWidth = width;
+    for (int row = 0; row < count(); ++row) {
+        QListWidgetItem *listItem = item(row);
+        const QModelIndex idx = model()->index(row, 0);
+        listItem->setSizeHint(QSize(width, delegate->heightFor(idx, font(), width)));
+    }
+}
+
+void BlockCardList::scheduleRelayout()
+{
+    if (m_relayouting)
+        return;
+    m_relayouting = true;
+    QTimer::singleShot(0, this, [this] {
+        m_relayouting = false;
+        relayout();
+    });
+}
+
 void BlockCardList::resizeEvent(QResizeEvent *event)
 {
     QListWidget::resizeEvent(event);
-    m_empty->setGeometry(viewport()->rect().adjusted(24, 24, -24, -24));
+    if (m_empty)
+        m_empty->setGeometry(viewport()->rect().adjusted(24, 24, -24, -24));
+    scheduleRelayout();
+}
+
+void BlockCardList::changeEvent(QEvent *event)
+{
+    QListWidget::changeEvent(event);
+    if (event->type() == QEvent::FontChange) {
+        m_layoutWidth = -1;
+        scheduleRelayout();
+    }
 }
 
 void BlockCardList::keyPressEvent(QKeyEvent *event)

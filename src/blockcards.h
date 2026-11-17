@@ -1,6 +1,7 @@
-// 右侧「版面块」卡片列表：类型色条 + 两行文本预览，支持多选与复制。
+// 右侧「版面块」卡片列表：类型色条 + 完整文本，支持多选与复制。
 #pragma once
 
+#include <QFont>
 #include <QListWidget>
 #include <QStyledItemDelegate>
 #include <QVector>
@@ -20,6 +21,9 @@ class BlockCardDelegate : public QStyledItemDelegate {
     Q_OBJECT
 public:
     explicit BlockCardDelegate(QObject *parent = nullptr);
+
+    // 按给定宽度和字体计算卡片高度；文本完整排版，不截断。
+    int heightFor(const QModelIndex &index, const QFont &font, int width) const;
 
     void paint(QPainter *painter, const QStyleOptionViewItem &option,
                const QModelIndex &index) const override;
@@ -46,10 +50,16 @@ signals:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
 
 private:
+    void relayout();
+    void scheduleRelayout();
+
     QLabel *m_empty = nullptr;
     bool m_updating = false;
+    bool m_relayouting = false;
+    int m_layoutWidth = -1;
 };
