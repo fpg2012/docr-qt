@@ -18,6 +18,10 @@ add_executable(docr-qt
     src/document.cpp
     src/pageview.cpp
     src/blockcards.cpp
+    src/preferences.cpp
+    src/exporters.cpp
+    src/ocrdiagnostics.cpp
+    src/ocrqueue.cpp
     src/mainwindow.cpp
     resources.qrc
 )

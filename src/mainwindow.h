@@ -4,12 +4,11 @@
 #include <QList>
 #include <QMainWindow>
 #include <QPair>
-#include <QQueue>
 #include <QSet>
 #include <QVector>
 
 #include "document.h"
-#include "ocr.h"
+#include "ocrqueue.h"
 
 class QAction;
 class QComboBox;
@@ -64,7 +63,6 @@ private:
 
     void openFiles();
     void openPreferences();
-    void showAbout();
     void openDirectory();
     void addPagesToUi();
     void showPage(int index);
@@ -74,10 +72,10 @@ private:
     void updateStats();
     void refreshPageList(int index);
 
-    void enqueuePages(const QVector<int> &pages);
-    void pumpQueue();
-    void onResult(int page, int generation, const ocr::PageResult &result);
-    void encodeAndSubmit(int page);
+    void onPageQueued(int page);
+    void onPageStarted(int page);
+    void onPageRetrying(int page);
+    void onPageFinished(int page, const ocr::PageResult &result);
     void ensureThumbs();
 
     void exportMarkdown();
@@ -85,7 +83,6 @@ private:
     void copyText();
     void copySelection();
     void showSelectionStatus();
-    QString saveEmptyDiagnostics(int page, const ocr::PageResult &result);
 
     void syncCardsFromView();
     void syncViewFromCards();
@@ -93,7 +90,7 @@ private:
     void showDropHint(bool on);
 
     Document m_doc;
-    ocr::Client m_client;
+    OcrQueue m_queue;
 
     QListWidget *m_pageList = nullptr;
     PageView *m_view = nullptr;
@@ -115,16 +112,12 @@ private:
     bool m_applyingTheme = false;
     void applyTheme();
 
-    QQueue<int> m_pending;
-    QSet<int> m_running;
-    QSet<int> m_emptyRetries;
-    int m_generation = 0;
+    QSet<int> m_retriedPages;
     int m_concurrency = 3;
     int m_dpi = 150;
     QString m_apiKey;
     QString m_baseUrl;
     QString m_purpose = QStringLiteral("rich_layout_recognition");
-    bool m_allDoneEmitted = true;
     bool m_showBoxes = true;
     bool m_batchMode = false;
     bool m_syncing = false;
