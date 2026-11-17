@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QFileDialog>
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -13,6 +14,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
+#include "core/layout.h"
 #include "core/ocr.h"
 #include "theme.h"
 
@@ -114,9 +116,31 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
     m_glmKeyEdit->setEchoMode(QLineEdit::Password);
     m_glmKeyEdit->setPlaceholderText(QStringLiteral("本地服务通常留空"));
 
+    m_layoutModelEdit = new QLineEdit(
+        initial.layoutModelPath.isEmpty() ? ocr::defaultLayoutModelPath()
+                                          : initial.layoutModelPath,
+        ocrPage);
+    m_layoutModelEdit->setPlaceholderText(
+        QStringLiteral("pp-doclayout-v3.onnx"));
+    auto *browseLayout = new QPushButton(QStringLiteral("选择…"), ocrPage);
+    auto *layoutRow = new QWidget(ocrPage);
+    auto *layoutRowLayout = new QHBoxLayout(layoutRow);
+    layoutRowLayout->setContentsMargins(0, 0, 0, 0);
+    layoutRowLayout->addWidget(m_layoutModelEdit, 1);
+    layoutRowLayout->addWidget(browseLayout);
+    connect(browseLayout, &QPushButton::clicked, this, [this] {
+        const QString path = QFileDialog::getOpenFileName(
+            this, QStringLiteral("选择 PP-DocLayoutV3 ONNX 模型"),
+            m_layoutModelEdit->text(),
+            QStringLiteral("ONNX 模型 (*.onnx);;所有文件 (*)"));
+        if (!path.isEmpty())
+            m_layoutModelEdit->setText(path);
+    });
+
     auto *backendHint = new QLabel(
         QStringLiteral("GLM-OCR 走本地 OpenAI 兼容 /v1/chat/completions；"
-                       "返回纯文本时整页作为一个文本块，不产生 DeepSeek OCR 页费。"),
+                       "先用 PP-DocLayoutV3 检测版面，再按区域并行识别，"
+                       "不产生 DeepSeek OCR 页费。"),
         ocrPage);
     backendHint->setWordWrap(true);
     backendHint->setForegroundRole(QPalette::PlaceholderText);
@@ -128,16 +152,19 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
     ocrForm->addRow(QStringLiteral("GLM 服务地址"), m_glmEndpointEdit);
     ocrForm->addRow(QStringLiteral("GLM 模型"), m_glmModelEdit);
     ocrForm->addRow(QStringLiteral("GLM API Key"), m_glmKeyEdit);
+    ocrForm->addRow(QStringLiteral("版面模型"), layoutRow);
     ocrForm->addRow(QString(), backendHint);
     ocrForm->addRow(QString(), ocrHint);
 
-    auto updateBackendFields = [this] {
+    auto updateBackendFields = [this, browseLayout] {
         const bool glm = m_backendCombo->currentData().toString()
                          == QStringLiteral("glmocr");
         m_purposeCombo->setEnabled(!glm);
         m_glmEndpointEdit->setEnabled(glm);
         m_glmModelEdit->setEnabled(glm);
         m_glmKeyEdit->setEnabled(glm);
+        m_layoutModelEdit->setEnabled(glm);
+        browseLayout->setEnabled(glm);
     };
     connect(m_backendCombo, &QComboBox::currentIndexChanged, this,
             [updateBackendFields](int) { updateBackendFields(); });
@@ -160,6 +187,7 @@ PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent
         m_glmEndpointEdit->setText(QStringLiteral("http://127.0.0.1:8080/v1/chat/completions"));
         m_glmModelEdit->setText(QStringLiteral("glm-ocr"));
         m_glmKeyEdit->clear();
+        m_layoutModelEdit->setText(ocr::defaultLayoutModelPath());
     });
     layout->addWidget(buttons);
     adjustSize();
@@ -184,6 +212,9 @@ Preferences PreferencesDialog::values() const
     if (result.glmModel.isEmpty())
         result.glmModel = QStringLiteral("glm-ocr");
     result.glmApiKey = m_glmKeyEdit->text();
+    result.layoutModelPath = m_layoutModelEdit->text().trimmed();
+    if (result.layoutModelPath.isEmpty())
+        result.layoutModelPath = ocr::defaultLayoutModelPath();
     result.dpi = m_dpiSpin->value();
     result.concurrency = m_concSpin->value();
     result.rememberKey = m_remember->isChecked();

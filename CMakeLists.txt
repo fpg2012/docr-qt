@@ -6,9 +6,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Network Widgets Concurrent)
 find_package(qpdf REQUIRED)
 find_package(yaml-cpp REQUIRED)
+find_package(onnxruntime REQUIRED)
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
@@ -17,6 +18,7 @@ pkg_check_modules(QT6SVG REQUIRED IMPORTED_TARGET Qt6Svg)
 # 与界面无关的核心：文档、OCR 客户端/队列、导出、诊断。
 add_library(docr-core STATIC
     src/core/ocr.cpp
+    src/core/layout.cpp
     src/core/document.cpp
     src/core/ocrqueue.cpp
     src/core/exporters.cpp
@@ -33,9 +35,11 @@ target_link_libraries(docr-core PUBLIC
     Qt6::Core
     Qt6::Gui
     Qt6::Network
+    Qt6::Concurrent
     PkgConfig::POPPLER_QT6
     qpdf::libqpdf
     yaml-cpp::yaml-cpp
+    onnxruntime::onnxruntime
 )
 
 # pindf 增量写入 helper（Rust）。产物与 docr-qt 放在同一目录，便于运行时查找。

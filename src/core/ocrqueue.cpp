@@ -26,9 +26,9 @@ void OcrQueue::configure(const QString &baseUrl, const QString &apiKey,
 }
 
 void OcrQueue::configureGlm(const QString &endpoint, const QString &model,
-                            const QString &apiKey)
+                            const QString &apiKey, const QString &layoutModel)
 {
-    m_client.configureGlm(endpoint, model, apiKey);
+    m_client.configureGlm(endpoint, model, apiKey, layoutModel);
 }
 
 void OcrQueue::setBackend(ocr::Backend backend)
@@ -128,6 +128,7 @@ bool OcrQueue::startPage(int page, bool *alreadyRunning)
 void OcrQueue::stop()
 {
     m_generation++;
+    m_client.cancelPending();
     m_pending.clear();
     m_running.clear();
     m_emptyRetries.clear();

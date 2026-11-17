@@ -15,6 +15,7 @@
 #include <algorithm>
 
 #include "core/document.h"
+#include "core/layout.h"
 #include "core/ocr.h"
 #include "core/ocrcost.h"
 #include "core/ocrdiagnostics.h"
@@ -210,12 +211,17 @@ int main(int argc, char *argv[])
     QCommandLineOption glmKeyOption(
         QStringLiteral("glm-key"), QStringLiteral("GLM API Key（本地通常留空）"),
         QStringLiteral("key"));
+    QCommandLineOption layoutModelOption(
+        QStringLiteral("layout-model"),
+        QStringLiteral("PP-DocLayoutV3 ONNX 版面模型（GLM 后端使用）"),
+        QStringLiteral("path"), ocr::defaultLayoutModelPath());
     QCommandLineOption quietOption({QStringLiteral("q"), QStringLiteral("quiet")},
                                    QStringLiteral("不打印逐页进度"));
 
     parser.addOptions({outputOption, purposeOption, dpiOption, concOption, formatOption,
                        pagesOption, apiKeyOption, baseUrlOption, backendOption,
-                       glmUrlOption, glmModelOption, glmKeyOption, quietOption});
+                       glmUrlOption, glmModelOption, glmKeyOption, layoutModelOption,
+                       quietOption});
     parser.addPositionalArgument(QStringLiteral("input"),
                                  QStringLiteral("PDF / 图片 / 目录，可以多个"));
 
@@ -296,7 +302,8 @@ int main(int argc, char *argv[])
     OcrQueue queue(&doc);
     queue.configure(parser.value(baseUrlOption), apiKey, purpose, concurrency);
     queue.configureGlm(parser.value(glmUrlOption), parser.value(glmModelOption),
-                       parser.value(glmKeyOption));
+                       parser.value(glmKeyOption),
+                       parser.value(layoutModelOption));
     queue.setBackend(backend);
 
     int finished = 0;

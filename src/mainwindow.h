@@ -158,6 +158,7 @@ private:
     QString m_glmEndpoint = QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
     QString m_glmModel = QStringLiteral("glm-ocr");
     QString m_glmApiKey;
+    QString m_layoutModelPath;
     bool m_showBoxes = true;
     bool m_batchMode = false;
     bool m_syncing = false;

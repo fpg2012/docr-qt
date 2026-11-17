@@ -9,6 +9,8 @@
 #include <QString>
 #include <QVector>
 
+#include <memory>
+
 namespace ocr {
 
 enum class Backend { DeepSeek, GlmOcr };
@@ -77,15 +79,20 @@ class Client : public QObject {
     Q_OBJECT
 public:
     explicit Client(QObject *parent = nullptr);
+    ~Client() override;
 
     void configure(const QString &baseUrl, const QString &apiKey);
     void configureGlm(const QString &endpoint, const QString &model,
-                      const QString &apiKey);
+                      const QString &apiKey,
+                      const QString &layoutModel = QString());
     void setBackend(Backend backend);
 
     // 异步提交一页；generation 用于丢弃取消之后到达的结果。
     void submit(int page, int generation, const QByteArray &data,
                 const QString &filename, const QString &purpose);
+
+    // 停止所有在途的 GLM 分区请求（取消/关闭文档时调用）。
+    void cancelPending();
 
 signals:
     void finished(int page, int generation, const ocr::PageResult &result);
@@ -94,12 +101,17 @@ private:
     void submitDeepSeek(int page, int generation, const QByteArray &data,
                         const QString &filename, const QString &purpose);
     void submitGlm(int page, int generation, const QByteArray &data);
+    void submitGlmWholePage(int page, int generation, const QByteArray &data,
+                            const QString &layoutError = QString());
     void handleReply(class QNetworkReply *reply, int page, int generation,
                      const QString &purpose, qint64 started);
     void handleGlmReply(class QNetworkReply *reply, int page, int generation,
-                        qint64 started);
+                        qint64 started, const QString &layoutError);
     void finishGlm(int page, int generation, const QJsonObject &response,
-                   const QByteArray &raw, qint64 started);
+                   const QByteArray &raw, qint64 started,
+                   const QString &layoutError);
+
+    std::shared_ptr<class LayoutEngine> layoutEngine(QString *error);
 
     QNetworkAccessManager m_nam;
     Backend m_backend = Backend::DeepSeek;
@@ -108,6 +120,13 @@ private:
     QString m_glmEndpoint;
     QString m_glmModel = QStringLiteral("glm-ocr");
     QString m_glmApiKey;
+    QString m_layoutModelPath;
+    QString m_layoutLoadedPath;
+    QString m_layoutError;
+    std::shared_ptr<class LayoutEngine> m_layoutEngine;
+
+    struct GlmPipeline;
+    std::unique_ptr<GlmPipeline> m_glmPipeline;
 };
 
 } // namespace ocr

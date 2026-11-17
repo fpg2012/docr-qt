@@ -18,24 +18,25 @@ Markdown。
 
 **依赖**
 
-- Qt 6：Widgets、Network、Gui、Svg
+- Qt 6：Widgets、Network、Gui、Svg、Concurrent
 - poppler-qt6 开发包
 - qpdf（overlay 规范化与混排文档 fallback）
 - yaml-cpp（导入 YAML 大纲）
+- ONNX Runtime（本地 GLM-OCR 的 PP-DocLayoutV3 版面检测）
 - Rust / Cargo（增量写入 helper；pindf 已放在 `vendor/pindf`）
 - CMake ≥ 3.21，支持 C++20 的编译器
 
 Arch Linux：
 
 ```bash
-sudo pacman -S --needed base-devel cmake pkgconf qt6-base qt6-svg poppler-qt6 qpdf yaml-cpp rust
+sudo pacman -S --needed base-devel cmake pkgconf qt6-base qt6-svg poppler-qt6 qpdf yaml-cpp rust onnxruntime
 ```
 
 Debian / Ubuntu：
 
 ```bash
 sudo apt install qt6-base-dev libqt6svg6-dev libpoppler-qt6-dev libqpdf-dev libyaml-cpp-dev \
-  cmake g++ cargo rustc
+  cmake g++ cargo rustc libonnxruntime-dev
 ```
 
 Windows：使用 [MSYS2](https://www.msys2.org/) 的 UCRT64 环境。项目通过 pkg-config 查找
@@ -153,9 +154,23 @@ chd:
 vllm serve zai-org/GLM-OCR --port 8080 --served-model-name glm-ocr
 ```
 
-GLM-OCR 返回的是整页文本，没有 DeepSeek 的版面坐标；程序会把整页作为一个文本块显示和
-写入可搜索 PDF，因此适合纯文本检索，不适合依赖精确框选版面的场景。本地后端不产生
-DeepSeek OCR 页费。
+GLM-OCR 的 vLLM 模型只负责文字/表格/公式识别，版面坐标由独立的 PP-DocLayoutV3
+模型提供。程序在本地用 ONNX Runtime 跑版面检测，再按区域并行调用 vLLM，因此 GLM
+后端也有标题、正文、表格、图片、脚注等版面块和真实坐标。界面和 `docr-cli` 都支持
+指定版面模型路径：
+
+```bash
+# 默认位置
+~/.local/share/docr-qt/models/pp-doclayout-v3.onnx
+
+# 或显式指定
+export DOCR_LAYOUT_MODEL=/path/to/pp-doclayout-v3.onnx
+./build/docr-cli --backend glmocr --layout-model /path/to/pp-doclayout-v3.onnx ...
+```
+
+也可以在「首选项 → 识别 → 版面模型」里选择 ONNX 文件。找不到模型时会退回整页文本
+识别，并在 JSON 的 `layout_error` 中记录原因。模型只用于本地推理，运行时不需要 Python。
+本地后端不产生 DeepSeek OCR 页费。
 
 Windows 下把命令中的 `docr-cli` 换成 `docr-cli.exe`。在 UCRT64 shell 中运行时会自动找到
 Qt 和 poppler 的 DLL；若要脱离 MSYS2 分发，需要将相关 DLL 与 exe 放在一起，可先用
@@ -178,7 +193,8 @@ sudo cmake --install build
 src/
 ├── core/                  # 与界面无关，GUI 和 CLI 共用
 │   ├── document.*         # PDF / 图片模型、按需渲染、缩略图
-│   ├── ocr.*              # OCR 客户端、multipart 组包、标记解析
+│   ├── ocr.*              # OCR 客户端、multipart 组包、GLM 分区识别
+│   ├── layout.*           # PP-DocLayoutV3 ONNX 版面检测
 │   ├── ocrqueue.*         # 并发队列、取消、空结果重试
 │   ├── exporters.*        # Markdown / JSON 导出
 │   ├── pdfexport.*        # 可搜索 PDF：文本层、增量写入与 qpdf fallback

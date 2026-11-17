@@ -53,6 +53,7 @@
 #include "blockcards.h"
 #include "costdialog.h"
 #include "core/exporters.h"
+#include "core/layout.h"
 #include "core/ocrdiagnostics.h"
 #include "core/ocrcost.h"
 #include "core/pdfexport.h"
@@ -558,9 +559,13 @@ void MainWindow::applySettings()
     m_glmModel = settings.value(QStringLiteral("glmModel"),
                                 QStringLiteral("glm-ocr")).toString();
     m_glmApiKey = settings.value(QStringLiteral("glmApiKey")).toString();
+    m_layoutModelPath = settings.value(QStringLiteral("layoutModel"),
+                                       ocr::defaultLayoutModelPath()).toString();
+    if (m_layoutModelPath.trimmed().isEmpty())
+        m_layoutModelPath = ocr::defaultLayoutModelPath();
     m_doc.setDpi(m_dpi);
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
-    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey);
+    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey, m_layoutModelPath);
     m_queue.setBackend(ocr::backendFromString(m_ocrBackend));
     if (m_replaceOutline) {
         QSignalBlocker blocker(m_replaceOutline);
@@ -580,7 +585,8 @@ void MainWindow::applySettings()
                          : QStringLiteral("OCR 按页费计费（1.5 元/千页）；tokens 仅统计用量。"));
         m_purposeBox->setEnabled(!localGlm);
         m_purposeBox->setToolTip(
-            localGlm ? QStringLiteral("GLM-OCR 总是返回整页文本，不使用 DeepSeek 版面模式")
+            localGlm ? QStringLiteral("GLM-OCR 使用 PP-DocLayoutV3 版面模型，"
+                                      "按区域识别，不使用 DeepSeek 识别模式")
                      : QStringLiteral("DeepSeek OCR 的识别模式"));
     }
     if (m_replaceOutline)
@@ -597,6 +603,7 @@ void MainWindow::saveSettings()
     settings.setValue(QStringLiteral("ocrBackend"), m_ocrBackend);
     settings.setValue(QStringLiteral("glmEndpoint"), m_glmEndpoint);
     settings.setValue(QStringLiteral("glmModel"), m_glmModel);
+    settings.setValue(QStringLiteral("layoutModel"), m_layoutModelPath);
     if (settings.value(QStringLiteral("rememberKey"), false).toBool()) {
         settings.setValue(QStringLiteral("apiKey"), m_apiKey);
         if (!m_glmApiKey.isEmpty())
@@ -609,7 +616,7 @@ void MainWindow::saveSettings()
         settings.setValue(QStringLiteral("replaceOutlineWithOcr"),
                           m_replaceOutline->isChecked());
     m_queue.configure(m_baseUrl, m_apiKey, m_purpose, m_concurrency);
-    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey);
+    m_queue.configureGlm(m_glmEndpoint, m_glmModel, m_glmApiKey, m_layoutModelPath);
     m_queue.setBackend(ocr::backendFromString(m_ocrBackend));
     m_doc.setDpi(m_dpi);
 }
@@ -626,6 +633,7 @@ void MainWindow::openPreferences()
     initial.glmEndpoint = m_glmEndpoint;
     initial.glmModel = m_glmModel;
     initial.glmApiKey = m_glmApiKey;
+    initial.layoutModelPath = m_layoutModelPath;
     initial.rememberKey = QSettings().value(QStringLiteral("rememberKey"), false).toBool();
 
     PreferencesDialog dialog(initial, this);
@@ -644,6 +652,7 @@ void MainWindow::openPreferences()
     m_glmEndpoint = values.glmEndpoint;
     m_glmModel = values.glmModel;
     m_glmApiKey = values.glmApiKey;
+    m_layoutModelPath = values.layoutModelPath;
 
     QSettings settings;
     settings.setValue(QStringLiteral("rememberKey"), values.rememberKey);
@@ -666,7 +675,8 @@ void MainWindow::openPreferences()
                          : QStringLiteral("OCR 按页费计费（1.5 元/千页）；tokens 仅统计用量。"));
         m_purposeBox->setEnabled(!localGlm);
         m_purposeBox->setToolTip(
-            localGlm ? QStringLiteral("GLM-OCR 总是返回整页文本，不使用 DeepSeek 版面模式")
+            localGlm ? QStringLiteral("GLM-OCR 使用 PP-DocLayoutV3 版面模型，"
+                                      "按区域识别，不使用 DeepSeek 识别模式")
                      : QStringLiteral("DeepSeek OCR 的识别模式"));
     }
     updateStats();

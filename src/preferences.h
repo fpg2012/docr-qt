@@ -19,6 +19,7 @@ struct Preferences {
     QString glmEndpoint = QStringLiteral("http://127.0.0.1:8080/v1/chat/completions");
     QString glmModel = QStringLiteral("glm-ocr");
     QString glmApiKey;
+    QString layoutModelPath;
     bool rememberKey = false;
 };
 
@@ -37,6 +38,7 @@ private:
     QLineEdit *m_glmEndpointEdit = nullptr;
     QLineEdit *m_glmModelEdit = nullptr;
     QLineEdit *m_glmKeyEdit = nullptr;
+    QLineEdit *m_layoutModelEdit = nullptr;
     QSpinBox *m_dpiSpin = nullptr;
     QSpinBox *m_concSpin = nullptr;
     QCheckBox *m_remember = nullptr;
