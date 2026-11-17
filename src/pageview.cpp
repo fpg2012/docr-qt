@@ -34,6 +34,26 @@ QPen bandPen(const QColor &color)
     return pen;
 }
 
+// QTextLayout 不会自动为每行设置 y 坐标；不显式 setPosition 时所有 line.y()
+// 都是 0，按行命中会永远落在第一行。统一在这里排版并给行定位。
+void layoutTextLines(QTextLayout &layout, qreal width)
+{
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    qreal y = 0;
+    while (true) {
+        QTextLine line = layout.createLine();
+        if (!line.isValid())
+            break;
+        line.setLineWidth(width);
+        line.setPosition(QPointF(0, y));
+        y += line.height();
+    }
+    layout.endLayout();
+}
+
 int textLineCount(const QFont &font, qreal width, const QString &text)
 {
     if (text.isEmpty() || width <= 0)
@@ -340,19 +360,8 @@ int PageView::charAt(int block, const QPointF &scenePos) const
     if (box.isEmpty() || box.width() <= 0)
         return -1;
 
-    const QFont f = textFontFor(block, box);
-    QTextLayout layout(m_texts.at(block), f);
-    QTextOption option;
-    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-    layout.setTextOption(option);
-    layout.beginLayout();
-    while (true) {
-        QTextLine line = layout.createLine();
-        if (!line.isValid())
-            break;
-        line.setLineWidth(box.width());
-    }
-    layout.endLayout();
+    QTextLayout layout(m_texts.at(block), textFontFor(block, box));
+    layoutTextLines(layout, box.width());
     if (layout.lineCount() == 0)
         return -1;
 
@@ -623,21 +632,61 @@ void PageView::wheelEvent(QWheelEvent *event)
         return;
     }
 
-    const int dy = event->angleDelta().y();
+    // 触控板给 pixelDelta（已是像素），普通滚轮给 angleDelta（120 = 一格）。
+    // 不再交给 QGraphicsView：它一格会滚掉好几行，短页面上几乎等于整页。
+    const bool fromAngle = event->pixelDelta().isNull();
+    QPoint delta = fromAngle ? event->angleDelta() : event->pixelDelta();
+    if (event->modifiers().testFlag(Qt::ShiftModifier) && delta.x() == 0)
+        delta = QPoint(delta.y(), 0);
+    if (delta.isNull()) {
+        QGraphicsView::wheelEvent(event);
+        return;
+    }
+
+    const auto toPixels = [fromAngle](int value) {
+        return fromAngle ? qRound(value * 0.75) : value;
+    };
+    const int dx = toPixels(delta.x());
+    const int dy = toPixels(delta.y());
+
+    if (event->phase() == Qt::ScrollBegin)
+        m_wheelOverscroll = 0;
+
+    auto *hbar = horizontalScrollBar();
+    if (dx != 0 && hbar->maximum() > hbar->minimum())
+        hbar->setValue(hbar->value() - dx);
+
     auto *bar = verticalScrollBar();
     const bool scrollable = bar->maximum() > bar->minimum();
     const bool atTop = !scrollable || bar->value() <= bar->minimum();
     const bool atBottom = !scrollable || bar->value() >= bar->maximum();
-    if (dy != 0 && ((dy < 0 && atBottom) || (dy > 0 && atTop))) {
-        // 翻页节流，避免触控板惯性一次跳很多页。
-        if (!m_wheelClock.isValid() || m_wheelClock.elapsed() > 320) {
-            m_wheelClock.restart();
-            emit pageStepRequested(dy < 0 ? 1 : -1);
-        }
+    const bool towardEdge = dy > 0 ? atTop : atBottom;
+
+    if (dy == 0) {
         event->accept();
         return;
     }
-    QGraphicsView::wheelEvent(event);
+
+    if (!towardEdge) {
+        bar->setValue(bar->value() - dy);
+        m_wheelOverscroll = 0;
+        event->accept();
+        return;
+    }
+
+    // 已经贴边：累计滚动量，够一次翻页才翻，避免轻轻一碰就跳页。
+    if ((m_wheelOverscroll > 0) != (dy > 0))
+        m_wheelOverscroll = 0;
+    m_wheelOverscroll += dy;
+
+    constexpr int kPageFlipThreshold = 150;
+    if (qAbs(m_wheelOverscroll) >= kPageFlipThreshold
+        && (!m_wheelClock.isValid() || m_wheelClock.elapsed() >= 500)) {
+        m_wheelClock.restart();
+        m_wheelOverscroll = 0;
+        emit pageStepRequested(dy < 0 ? 1 : -1);
+    }
+    event->accept();
 }
 
 void PageView::keyPressEvent(QKeyEvent *event)
@@ -846,19 +895,8 @@ void PageView::paintTextSelection(QPainter *painter) const
         if (box.isEmpty() || box.width() <= 0)
             continue;
 
-        const QFont f = textFontFor(block, box);
-        QTextLayout layout(m_texts.at(block), f);
-        QTextOption option;
-        option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
-        layout.setTextOption(option);
-        layout.beginLayout();
-        while (true) {
-            QTextLine line = layout.createLine();
-            if (!line.isValid())
-                break;
-            line.setLineWidth(box.width());
-        }
-        layout.endLayout();
+        QTextLayout layout(m_texts.at(block), textFontFor(block, box));
+        layoutTextLines(layout, box.width());
 
         for (int i = 0; i < layout.lineCount(); ++i) {
             const QTextLine line = layout.lineAt(i);

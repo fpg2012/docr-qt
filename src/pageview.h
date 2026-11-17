@@ -133,4 +133,5 @@ private:
     bool m_textDragging = false;
 
     QElapsedTimer m_wheelClock;
+    int m_wheelOverscroll = 0;
 };
