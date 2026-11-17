@@ -14,17 +14,20 @@
 #include <QScrollBar>
 #include <QTextLayout>
 #include <QTextOption>
-
-#include <limits>
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <limits>
 
+#include "core/document.h"
 #include "theme.h"
 
 namespace {
 
 constexpr int kBandThreshold = 3;
+constexpr qreal kPageMargin = 24.0;
+constexpr qreal kPageGap = 24.0;
+constexpr qreal kHorizontalPadding = 24.0;
 
 QPen bandPen(const QColor &color)
 {
@@ -75,6 +78,24 @@ int textLineCount(const QFont &font, qreal width, const QString &text)
     return lines;
 }
 
+QRectF pageBox(const QRectF &page, const QRectF &normalized)
+{
+    return QRectF(page.left() + normalized.x() * page.width() / 1000.0,
+                  page.top() + normalized.y() * page.height() / 1000.0,
+                  normalized.width() * page.width() / 1000.0,
+                  normalized.height() * page.height() / 1000.0);
+}
+
+QRectF blockRect(const QRectF &page, const ocr::Block &block)
+{
+    QRectF rect;
+    for (const QRectF &box : block.boxes) {
+        const QRectF pixel = pageBox(page, box);
+        rect = rect.isNull() ? pixel : rect.united(pixel);
+    }
+    return rect;
+}
+
 } // namespace
 
 PageView::PageView(QWidget *parent)
@@ -87,67 +108,95 @@ PageView::PageView(QWidget *parent)
     setDragMode(QGraphicsView::ScrollHandDrag);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     setResizeAnchor(QGraphicsView::AnchorViewCenter);
-    setAlignment(Qt::AlignCenter);
+    setAlignment(Qt::AlignHCenter | Qt::AlignTop);
     setFrameShape(QFrame::NoFrame);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);
     viewport()->setMouseTracking(true);
     updateBackground();
     updateCursor();
+
+    connect(verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        if (m_pages.isEmpty())
+            return;
+        ensureVisiblePages();
+        if (!m_navigating)
+            updateCurrentPageFromScroll();
+    });
 }
 
-void PageView::setPage(const QImage &image, const QVector<ocr::Block> &blocks, bool showBoxes)
+void PageView::setDocument(Document *document, bool showBoxes)
 {
-    clearTextSelection();
-    const bool hadSelection = !m_selection.isEmpty();
-    m_image = image;
-    m_blocks = blocks;
-    m_selection.clear();
-    m_bandBase.clear();
-    m_banding = false;
-    m_band = nullptr;
-    m_anchor = -1;
-    m_pendingToggle = -1;
-    m_hover = -1;
+    clearPage();
+    m_doc = document;
     m_boxesVisible = showBoxes;
-
-    m_scene->clear();
-    m_pixmap = nullptr;
-    m_items.clear();
-    m_order.clear();
-
-    if (image.isNull()) {
-        m_texts.clear();
-        m_textStart.clear();
-        m_textFonts.clear();
-        m_flowText.clear();
-        if (hadSelection)
-            emit selectionChanged({});
+    if (!m_doc || m_doc->count() == 0)
         return;
+
+    const int count = m_doc->count();
+    m_pages.resize(count);
+    qreal maxWidth = 1.0;
+    for (int i = 0; i < count; ++i) {
+        PageLayout &page = m_pages[i];
+        page.size = m_doc->pageSize(i);
+        if (page.size.width() < 1 || page.size.height() < 1)
+            page.size = QSizeF(1000, 1414);
+        maxWidth = qMax(maxWidth, page.size.width());
+
+        const PageEntry &entry = m_doc->page(i);
+        if (entry.result.ok()
+            && entry.result.purpose == QStringLiteral("rich_layout_recognition")) {
+            page.blocks = entry.result.blocks;
+        }
     }
 
-    m_pixmap = m_scene->addPixmap(QPixmap::fromImage(image));
-    m_pixmap->setTransformationMode(Qt::SmoothTransformation);
-    m_pixmap->setZValue(0);
-    m_scene->setSceneRect(QRectF(QPointF(0, 0), image.size()));
+    qreal y = kPageMargin;
+    for (PageLayout &page : m_pages) {
+        const qreal x = (maxWidth - page.size.width()) / 2.0;
+        page.rect = QRectF(x, y, page.size.width(), page.size.height());
+        y += page.size.height() + kPageGap;
+    }
+    const qreal totalHeight =
+        m_pages.isEmpty() ? kPageMargin * 2 : y - kPageGap + kPageMargin;
+    m_scene->setSceneRect(QRectF(0, 0, maxWidth, totalHeight));
 
-    rebuildItems();
-    m_fitPending = true;
+    for (PageLayout &page : m_pages) {
+        auto *background = new QGraphicsRectItem(page.rect);
+        background->setZValue(-1);
+        background->setBrush(QColor(255, 255, 255));
+        QPen border(palette().color(QPalette::Mid), 1.0);
+        border.setCosmetic(true);
+        background->setPen(border);
+        m_scene->addItem(background);
+        page.background = background;
+    }
+
+    rebuildBlocks();
     fitWidth();
-    horizontalScrollBar()->setValue(horizontalScrollBar()->minimum());
+    m_navigating = true;
     verticalScrollBar()->setValue(verticalScrollBar()->minimum());
-    if (hadSelection)
-        emit selectionChanged({});
+    horizontalScrollBar()->setValue(horizontalScrollBar()->minimum());
+    m_navigating = false;
+    ensureVisiblePages();
+    m_currentPage = 0;
+    if (viewport()->height() > 0) {
+        QRectF visible = mapToScene(viewport()->rect()).boundingRect();
+        qreal bestArea = -1;
+        for (int i = 0; i < m_pages.size(); ++i) {
+            const QRectF inter = m_pages.at(i).rect.intersected(visible);
+            const qreal area = inter.width() * inter.height();
+            if (area > bestArea) {
+                bestArea = area;
+                m_currentPage = i;
+            }
+        }
+    }
+    emit currentPageChanged(m_currentPage);
 }
 
 void PageView::clearPage()
 {
     clearTextSelection();
-    m_image = QImage();
-    m_blocks.clear();
-    m_order.clear();
-    m_order.squeeze();
-    m_items.clear();
     m_selection.clear();
     m_bandBase.clear();
     m_anchor = -1;
@@ -155,12 +204,43 @@ void PageView::clearPage()
     m_hover = -1;
     m_banding = false;
     m_band = nullptr;
-    m_texts.clear();
-    m_textStart.clear();
-    m_textFonts.clear();
+    m_items.clear();
+    m_flat.clear();
+    m_pages.clear();
     m_flowText.clear();
+    m_textBegin = m_textEnd = m_textCaret = m_textAnchor = -1;
+    m_textHasSelection = false;
+    m_textDragging = false;
+    m_currentPage = -1;
+    m_doc = nullptr;
+    m_wheelRun = 0;
+    m_wheelSign = 0;
+    m_wheelTimer.invalidate();
     m_scene->clear();
-    m_pixmap = nullptr;
+    m_scene->setSceneRect(QRectF());
+    resetTransform();
+    m_fitMode = true;
+    emit currentPageChanged(-1);
+    emit selectionChanged({});
+}
+
+void PageView::refreshPage(int page)
+{
+    if (!m_doc || page < 0 || page >= m_pages.size())
+        return;
+    const PageEntry &entry = m_doc->page(page);
+    PageLayout &layout = m_pages[page];
+    layout.blocks.clear();
+    if (entry.result.ok()
+        && entry.result.purpose == QStringLiteral("rich_layout_recognition")) {
+        layout.blocks = entry.result.blocks;
+    }
+    clearTextSelection();
+    applySelection({}, false);
+    rebuildBlocks();
+    ensureVisiblePages();
+    emit selectionChanged({});
+    update();
 }
 
 void PageView::setBoxesVisible(bool visible)
@@ -170,197 +250,285 @@ void PageView::setBoxesVisible(bool visible)
         ref.item->setVisible(visible);
 }
 
-void PageView::rebuildItems()
+void PageView::updateBackground()
 {
-    for (const BoxRef &ref : m_items)
-        delete ref.item;
-    m_items.clear();
-    m_order.clear();
-    if (m_band) {
-        m_scene->removeItem(m_band);
-        delete m_band;
-        m_band = nullptr;
-        m_banding = false;
+    QColor background = palette().color(QPalette::Window);
+    background = background.lightness() < 128 ? background.darker(115)
+                                              : background.darker(108);
+    setBackgroundBrush(background);
+    const QColor border = palette().color(QPalette::Mid);
+    for (PageLayout &page : m_pages) {
+        if (!page.background)
+            continue;
+        QPen pen(border, 1.0);
+        pen.setCosmetic(true);
+        page.background->setPen(pen);
     }
-    if (m_image.isNull())
-        return;
+}
 
-    const double w = m_image.width();
-    const double h = m_image.height();
-    for (int i = 0; i < m_blocks.size(); ++i) {
-        for (const QRectF &box : m_blocks.at(i).boxes) {
-            const QRectF pixel(box.x() * w / 1000.0, box.y() * h / 1000.0,
-                               box.width() * w / 1000.0, box.height() * h / 1000.0);
-            auto *item = new QGraphicsRectItem(pixel);
-            item->setData(0, i);
-            item->setZValue(10);
-            item->setToolTip(ocr::displayText(m_blocks.at(i).text).left(400));
-            m_scene->addItem(item);
-            m_items.append({item, i});
+void PageView::rebuildBlocks()
+{
+    clearBlockItems();
+    m_flat.clear();
+
+    for (PageLayout &page : m_pages) {
+        page.order.resize(page.blocks.size());
+        for (int i = 0; i < page.blocks.size(); ++i)
+            page.order[i] = i;
+        const auto topOf = [&page](int index) {
+            if (page.blocks.at(index).boxes.isEmpty())
+                return 1e9;
+            return page.blocks.at(index).boxes.first().top();
+        };
+        const auto leftOf = [&page](int index) {
+            if (page.blocks.at(index).boxes.isEmpty())
+                return 1e9;
+            return page.blocks.at(index).boxes.first().left();
+        };
+        std::stable_sort(page.order.begin(), page.order.end(), [&](int a, int b) {
+            if (qAbs(topOf(a) - topOf(b)) > 6.0)
+                return topOf(a) < topOf(b);
+            return leftOf(a) < leftOf(b);
+        });
+        page.flatIndex = QVector<int>(page.blocks.size(), -1);
+    }
+
+    for (int p = 0; p < m_pages.size(); ++p) {
+        PageLayout &page = m_pages[p];
+        for (int b : page.order) {
+            const ocr::Block &block = page.blocks.at(b);
+            FlatBlock flat;
+            flat.page = p;
+            flat.block = b;
+            flat.box = blockRect(page.rect, block);
+            flat.text = ocr::displayText(block.text);
+            page.flatIndex[b] = m_flat.size();
+            m_flat.append(flat);
         }
     }
-
-    // 阅读顺序：按块左上角，避免同一行内左右错位。
-    m_order.resize(m_blocks.size());
-    for (int i = 0; i < m_blocks.size(); ++i)
-        m_order[i] = i;
-    const auto topOf = [this](int index) {
-        if (m_blocks.at(index).boxes.isEmpty())
-            return 1e9;
-        return m_blocks.at(index).boxes.first().top();
-    };
-    const auto leftOf = [this](int index) {
-        if (m_blocks.at(index).boxes.isEmpty())
-            return 1e9;
-        return m_blocks.at(index).boxes.first().left();
-    };
-    std::stable_sort(m_order.begin(), m_order.end(), [&](int a, int b) {
-        if (qAbs(topOf(a) - topOf(b)) > 6.0)
-            return topOf(a) < topOf(b);
-        return leftOf(a) < leftOf(b);
-    });
-
     rebuildTextFlow();
-    repaintAll();
-    setBoxesVisible(m_boxesVisible);
 }
 
 void PageView::rebuildTextFlow()
 {
-    const int n = m_blocks.size();
-    m_texts.resize(n);
-    m_textStart = QVector<int>(n, -1);
-    m_textFonts = QVector<QFont>(n);
     m_flowText.clear();
-
-    for (int i = 0; i < n; ++i)
-        m_texts[i] = ocr::displayText(m_blocks.at(i).text);
-
     bool first = true;
-    for (int block : m_order) {
-        if (m_texts.at(block).isEmpty())
+    for (FlatBlock &block : m_flat) {
+        if (block.text.isEmpty()) {
+            block.textStart = -1;
             continue;
+        }
         if (!first)
             m_flowText += QLatin1Char('\n');
-        m_textStart[block] = m_flowText.size();
-        m_flowText += m_texts.at(block);
+        block.textStart = m_flowText.size();
+        m_flowText += block.text;
         first = false;
     }
-
-    m_textAnchor = -1;
-    m_textBegin = -1;
-    m_textEnd = -1;
-    m_textCaret = -1;
-    m_textHasSelection = false;
-    m_textDragging = false;
 }
 
-void PageView::repaintBlock(int index)
+void PageView::clearBlockItems()
 {
-    if (index < 0 || index >= m_blocks.size())
-        return;
-    const QColor highlight = palette().color(QPalette::Highlight);
-    const bool selected = m_selection.contains(index);
-    const bool hovered = m_hover == index;
-    QColor color = selected ? highlight : ocr::colorForKind(m_blocks.at(index).kind);
-    QPen pen(color, selected ? 2.4 : hovered ? 2.0 : 1.4);
-    pen.setCosmetic(true);
-    QColor fill = color;
-    fill.setAlpha(selected ? 64 : hovered ? 34 : 18);
+    for (const BoxRef &ref : m_items)
+        delete ref.item;
+    m_items.clear();
+    for (PageLayout &page : m_pages)
+        page.itemsBuilt = false;
+}
 
-    for (const BoxRef &ref : m_items) {
-        if (ref.block != index)
+void PageView::ensurePageItems(int page)
+{
+    if (page < 0 || page >= m_pages.size())
+        return;
+    PageLayout &layout = m_pages[page];
+    if (layout.itemsBuilt)
+        return;
+    layout.itemsBuilt = true;
+    if (layout.blocks.isEmpty())
+        return;
+
+    for (int b : layout.order) {
+        const int flat = layout.flatIndex.value(b, -1);
+        if (flat < 0 || flat >= m_flat.size())
             continue;
-        ref.item->setPen(pen);
-        ref.item->setBrush(fill);
-    }
-}
-
-void PageView::repaintAll()
-{
-    for (int i = 0; i < m_blocks.size(); ++i)
-        repaintBlock(i);
-}
-
-void PageView::applySelection(const QSet<int> &next, bool notify)
-{
-    if (next == m_selection)
-        return;
-    QSet<int> changed = m_selection;
-    changed.unite(next);
-    m_selection = next;
-    for (int index : changed)
-        repaintBlock(index);
-    if (notify)
-        emit selectionChanged(selection());
-}
-
-void PageView::setSelection(const QVector<int> &blocks, bool notify)
-{
-    clearTextSelection();
-    QSet<int> next;
-    for (int index : blocks) {
-        if (index >= 0 && index < m_blocks.size())
-            next.insert(index);
-    }
-    applySelection(next, notify);
-}
-
-void PageView::updateHover(int index)
-{
-    if (index == m_hover)
-        return;
-    const int previous = m_hover;
-    m_hover = index;
-    repaintBlock(previous);
-    repaintBlock(index);
-}
-
-QRectF PageView::blockBox(int block) const
-{
-    QRectF rect;
-    for (const BoxRef &ref : m_items) {
-        if (ref.block != block)
-            continue;
-        rect = rect.isNull() ? ref.item->sceneBoundingRect()
-                             : rect.united(ref.item->sceneBoundingRect());
-    }
-    return rect;
-}
-
-QFont PageView::textFontFor(int block, const QRectF &box) const
-{
-    if (block < 0 || block >= m_textFonts.size())
-        return font();
-    if (m_textFonts.at(block).pixelSize() > 0)
-        return m_textFonts.at(block);
-
-    QFont base = font();
-    const QString &text = m_texts.at(block);
-    const int maxPx = qBound(6, int(box.height() * 0.9), 64);
-    for (int px = maxPx; px >= 6; --px) {
-        base.setPixelSize(px);
-        const int lines = textLineCount(base, box.width(), text);
-        const qreal total = lines * QFontMetrics(base).lineSpacing();
-        if (total <= box.height() * 1.08) {
-            m_textFonts[block] = base;
-            return base;
+        const ocr::Block &block = layout.blocks.at(b);
+        for (const QRectF &box : block.boxes) {
+            auto *item = new QGraphicsRectItem(pageBox(layout.rect, box));
+            item->setData(0, flat);
+            item->setZValue(10);
+            item->setToolTip(ocr::displayText(block.text).left(400));
+            item->setVisible(m_boxesVisible);
+            m_scene->addItem(item);
+            m_items.append({item, flat, page});
         }
     }
-    base.setPixelSize(6);
-    m_textFonts[block] = base;
-    return base;
 }
 
-int PageView::charAt(int block, const QPointF &scenePos) const
+void PageView::ensurePageLoaded(int page)
 {
-    if (block < 0 || block >= m_texts.size() || m_texts.at(block).isEmpty())
+    if (!m_doc || page < 0 || page >= m_pages.size())
+        return;
+    PageLayout &layout = m_pages[page];
+    if (!layout.imageLoaded) {
+        const QImage image = m_doc->ensureImage(page);
+        if (!image.isNull()) {
+            if (!layout.pixmap) {
+                layout.pixmap = new QGraphicsPixmapItem;
+                layout.pixmap->setZValue(0);
+                layout.pixmap->setTransformationMode(Qt::SmoothTransformation);
+                m_scene->addItem(layout.pixmap);
+            }
+            layout.pixmap->setPixmap(QPixmap::fromImage(image));
+            layout.pixmap->setTransform(QTransform::fromScale(
+                layout.rect.width() / image.width(), layout.rect.height() / image.height()));
+            layout.pixmap->setPos(layout.rect.topLeft());
+            layout.pixmap->setVisible(true);
+            layout.imageLoaded = true;
+        }
+    }
+    ensurePageItems(page);
+}
+
+void PageView::unloadPage(int page)
+{
+    if (page < 0 || page >= m_pages.size())
+        return;
+    PageLayout &layout = m_pages[page];
+    if (layout.pixmap) {
+        m_scene->removeItem(layout.pixmap);
+        delete layout.pixmap;
+        layout.pixmap = nullptr;
+    }
+    layout.imageLoaded = false;
+    for (int i = m_items.size() - 1; i >= 0; --i) {
+        if (m_items.at(i).page != page)
+            continue;
+        delete m_items.at(i).item;
+        m_items.removeAt(i);
+    }
+    layout.itemsBuilt = false;
+    if (m_doc)
+        m_doc->releaseImage(page);
+}
+
+void PageView::ensureVisiblePages()
+{
+    if (!m_doc || m_pages.isEmpty())
+        return;
+    const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
+    const qreal h = qMax<qreal>(visible.height(), 400.0);
+    const QRectF load = visible.adjusted(0, -h * 0.75, 0, h * 0.75);
+    const QRectF keep = visible.adjusted(0, -h * 1.75, 0, h * 1.75);
+
+    for (int i = 0; i < m_pages.size(); ++i) {
+        const QRectF &rect = m_pages.at(i).rect;
+        if (load.intersects(rect)) {
+            ensurePageLoaded(i);
+        } else if (!keep.intersects(rect)) {
+            if (m_pages.at(i).imageLoaded)
+                unloadPage(i);
+            else
+                m_doc->releaseImage(i); // OCR 上传等路径可能留下整页缓存
+        }
+    }
+}
+
+int PageView::pageAtY(qreal sceneY) const
+{
+    if (m_pages.isEmpty())
         return -1;
-    const QRectF box = blockBox(block);
+    int result = 0;
+    for (int i = 0; i < m_pages.size(); ++i) {
+        if (m_pages.at(i).rect.top() <= sceneY + 0.5)
+            result = i;
+        else
+            break;
+    }
+    return result;
+}
+
+void PageView::updateCurrentPageFromScroll()
+{
+    if (m_pages.isEmpty())
+        return;
+    const QRectF visible = mapToScene(viewport()->rect()).boundingRect();
+    int best = -1;
+    qreal bestArea = 0;
+    for (int i = 0; i < m_pages.size(); ++i) {
+        const QRectF inter = m_pages.at(i).rect.intersected(visible);
+        const qreal area = inter.width() * inter.height();
+        if (area > bestArea) {
+            bestArea = area;
+            best = i;
+        }
+    }
+    if (best < 0)
+        best = pageAtY(visible.top());
+    if (best != m_currentPage) {
+        m_currentPage = best;
+        emit currentPageChanged(best);
+        emit selectionChanged(selection());
+    }
+}
+
+void PageView::setCurrentPage(int page)
+{
+    setCurrentPageInternal(page, true);
+}
+
+void PageView::setCurrentPageInternal(int page, bool scroll)
+{
+    if (m_pages.isEmpty())
+        return;
+    page = qBound(0, page, m_pages.size() - 1);
+    ensurePageLoaded(page);
+    if (scroll) {
+        const qreal scale = transform().m11();
+        const int target = qRound(m_pages.at(page).rect.top() * scale);
+        m_navigating = true;
+        verticalScrollBar()->setValue(target);
+        m_navigating = false;
+    }
+    ensureVisiblePages();
+    if (m_currentPage != page) {
+        m_currentPage = page;
+        emit currentPageChanged(page);
+        emit selectionChanged(selection());
+    }
+}
+
+int PageView::flatForBlock(int page, int block) const
+{
+    if (page < 0 || page >= m_pages.size())
+        return -1;
+    return m_pages.at(page).flatIndex.value(block, -1);
+}
+
+int PageView::localBlock(int flat) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return -1;
+    return m_flat.at(flat).block;
+}
+
+QRectF PageView::blockBox(int flat) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return {};
+    return m_flat.at(flat).box;
+}
+
+int PageView::charIndexAt(int flat, const QPointF &scenePos) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return -1;
+    const FlatBlock &block = m_flat.at(flat);
+    if (block.text.isEmpty())
+        return -1;
+    const QRectF box = block.box;
     if (box.isEmpty() || box.width() <= 0)
         return -1;
 
-    QTextLayout layout(m_texts.at(block), textFontFor(block, box));
+    QTextLayout layout(block.text, textFontFor(flat, box));
     layoutTextLines(layout, box.width());
     if (layout.lineCount() == 0)
         return -1;
@@ -378,18 +546,44 @@ int PageView::charAt(int block, const QPointF &scenePos) const
     }
     const QTextLine line = layout.lineAt(bestLine);
     const int cursor = line.xToCursor(p.x() - line.x());
-    return qBound(0, cursor, m_texts.at(block).size());
+    return qBound(0, cursor, block.text.size());
 }
 
 int PageView::textOffsetAt(const QPointF &scenePos) const
 {
-    const int block = blockAtScene(scenePos);
-    if (block < 0 || block >= m_textStart.size() || m_textStart.at(block) < 0)
+    const int flat = blockAtScene(scenePos);
+    if (flat < 0 || flat >= m_flat.size() || m_flat.at(flat).textStart < 0)
         return -1;
-    const int ch = charAt(block, scenePos);
+    const int ch = charIndexAt(flat, scenePos);
     if (ch < 0)
         return -1;
-    return m_textStart.at(block) + ch;
+    return m_flat.at(flat).textStart + ch;
+}
+
+QFont PageView::textFontFor(int flat, const QRectF &box) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return font();
+    FlatBlock &block = m_flat[flat];
+    if (block.font.pixelSize() > 0)
+        return block.font;
+    if (block.text.isEmpty() || box.isEmpty() || box.width() <= 0)
+        return font();
+
+    QFont base = font();
+    const int maxPx = qBound(6, int(box.height() * 0.9), 64);
+    for (int px = maxPx; px >= 6; --px) {
+        base.setPixelSize(px);
+        const int lines = textLineCount(base, box.width(), block.text);
+        const qreal total = lines * QFontMetrics(base).lineSpacing();
+        if (total <= box.height() * 1.08) {
+            block.font = base;
+            return base;
+        }
+    }
+    base.setPixelSize(6);
+    block.font = base;
+    return base;
 }
 
 void PageView::setTextRange(int begin, int end, int caret)
@@ -406,11 +600,11 @@ void PageView::setTextRange(int begin, int end, int caret)
     m_textHasSelection = m_textEnd > m_textBegin;
 
     int blocks = 0;
-    for (int block : m_order) {
-        if (m_textStart.at(block) < 0)
+    for (const FlatBlock &block : m_flat) {
+        if (block.textStart < 0)
             continue;
-        const int start = m_textStart.at(block);
-        const int stop = start + m_texts.at(block).size();
+        const int start = block.textStart;
+        const int stop = start + block.text.size();
         if (start < m_textEnd && stop > m_textBegin)
             ++blocks;
     }
@@ -444,24 +638,14 @@ void PageView::clearTextSelection()
 
 QVector<int> PageView::selection() const
 {
-    if (m_textHasSelection) {
-        QVector<int> result;
-        for (int block : m_order) {
-            if (m_textStart.at(block) < 0)
-                continue;
-            const int start = m_textStart.at(block);
-            const int stop = start + m_texts.at(block).size();
-            if (start < m_textEnd && stop > m_textBegin)
-                result.append(block);
-        }
-        return result;
-    }
-
+    if (m_currentPage < 0 || m_currentPage >= m_pages.size())
+        return {};
+    const PageLayout &page = m_pages.at(m_currentPage);
     QVector<int> result;
-    result.reserve(m_selection.size());
-    for (int index : m_order) {
-        if (m_selection.contains(index))
-            result.append(index);
+    for (int b : page.order) {
+        const int flat = page.flatIndex.value(b, -1);
+        if (flat >= 0 && m_selection.contains(flat))
+            result.append(b);
     }
     return result;
 }
@@ -471,37 +655,105 @@ QString PageView::selectedText() const
     if (m_textHasSelection)
         return m_flowText.mid(m_textBegin, m_textEnd - m_textBegin);
 
+    if (m_currentPage < 0 || m_currentPage >= m_pages.size())
+        return {};
+    const PageLayout &page = m_pages.at(m_currentPage);
     QStringList parts;
-    for (int index : m_order) {
-        if (!m_selection.contains(index))
+    for (int b : page.order) {
+        const int flat = page.flatIndex.value(b, -1);
+        if (flat < 0 || !m_selection.contains(flat))
             continue;
-        const QString text = ocr::displayText(m_blocks.at(index).text);
+        const QString text = m_flat.at(flat).text;
         if (!text.isEmpty())
-            parts << text;
+            parts.append(text);
     }
     return parts.join(QLatin1Char('\n'));
 }
 
 int PageView::copySelection()
 {
-    if (m_textHasSelection) {
-        const QString text = selectedText();
-        if (text.isEmpty())
-            return 0;
-        QApplication::clipboard()->setText(text);
-        emit textCopied(selection().size(), text.size());
-        return selection().size();
-    }
-
-    const int count = m_selection.size();
-    if (count == 0)
-        return 0;
     const QString text = selectedText();
     if (text.isEmpty())
         return 0;
     QApplication::clipboard()->setText(text);
-    emit textCopied(count, text.size());
-    return count;
+    int blocks = 0;
+    if (m_textHasSelection) {
+        for (const FlatBlock &block : m_flat) {
+            if (block.textStart < 0)
+                continue;
+            if (block.textStart < m_textEnd
+                && block.textStart + block.text.size() > m_textBegin)
+                ++blocks;
+        }
+    } else {
+        blocks = selection().size();
+    }
+    emit textCopied(blocks, text.size());
+    return blocks;
+}
+
+void PageView::applySelection(const QSet<int> &next, bool notify)
+{
+    if (next == m_selection)
+        return;
+    QSet<int> changed = m_selection;
+    changed.unite(next);
+    m_selection = next;
+    for (int flat : changed)
+        repaintBlock(flat);
+    if (notify)
+        emit selectionChanged(selection());
+}
+
+void PageView::setSelection(const QVector<int> &blocks, bool notify)
+{
+    clearTextSelection();
+    QSet<int> next;
+    for (int block : blocks) {
+        const int flat = flatForBlock(m_currentPage, block);
+        if (flat >= 0)
+            next.insert(flat);
+    }
+    applySelection(next, notify);
+}
+
+void PageView::repaintBlock(int flat)
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return;
+    const FlatBlock &block = m_flat.at(flat);
+    const ocr::Block &data = m_pages.at(block.page).blocks.at(block.block);
+    const QColor highlight = palette().color(QPalette::Highlight);
+    const bool selected = m_selection.contains(flat);
+    const bool hovered = m_hover == flat;
+    QColor color = selected ? highlight : ocr::colorForKind(data.kind);
+    QPen pen(color, selected ? 2.4 : hovered ? 2.0 : 1.4);
+    pen.setCosmetic(true);
+    QColor fill = color;
+    fill.setAlpha(selected ? 64 : hovered ? 34 : 18);
+
+    for (const BoxRef &ref : m_items) {
+        if (ref.flat != flat)
+            continue;
+        ref.item->setPen(pen);
+        ref.item->setBrush(fill);
+    }
+}
+
+void PageView::repaintAll()
+{
+    for (int i = 0; i < m_flat.size(); ++i)
+        repaintBlock(i);
+}
+
+void PageView::updateHover(int flat)
+{
+    if (flat == m_hover)
+        return;
+    const int previous = m_hover;
+    m_hover = flat;
+    repaintBlock(previous);
+    repaintBlock(flat);
 }
 
 int PageView::blockAtScene(const QPointF &scenePos) const
@@ -509,7 +761,7 @@ int PageView::blockAtScene(const QPointF &scenePos) const
     for (int i = m_items.size() - 1; i >= 0; --i) {
         const BoxRef &ref = m_items.at(i);
         if (ref.item->sceneBoundingRect().contains(scenePos))
-            return ref.block;
+            return ref.flat;
     }
     return -1;
 }
@@ -526,10 +778,12 @@ QVector<int> PageView::blocksInRect(const QRectF &sceneRect) const
         return result;
     QSet<int> seen;
     for (const BoxRef &ref : m_items) {
-        if (!seen.contains(ref.block) && ref.item->sceneBoundingRect().intersects(sceneRect)) {
-            seen.insert(ref.block);
-            result.append(ref.block);
-        }
+        if (ref.page != m_currentPage || seen.contains(ref.flat))
+            continue;
+        if (!ref.item->sceneBoundingRect().intersects(sceneRect))
+            continue;
+        seen.insert(ref.flat);
+        result.append(ref.flat);
     }
     return result;
 }
@@ -562,8 +816,8 @@ void PageView::updateBand(const QPoint &pos)
     m_band->setRect(rect);
 
     QSet<int> next = m_bandBase;
-    for (int index : blocksInRect(rect))
-        next.insert(index);
+    for (int flat : blocksInRect(rect))
+        next.insert(flat);
     applySelection(next);
 }
 
@@ -591,7 +845,10 @@ void PageView::finishBand(bool commit)
 
 void PageView::ensureBlockVisible(int index)
 {
-    const QRectF rect = blockBox(index);
+    const int flat = flatForBlock(m_currentPage, index);
+    if (flat < 0)
+        return;
+    const QRectF rect = blockBox(flat);
     if (!rect.isEmpty())
         ensureVisible(rect.adjusted(-20, -20, 20, 20), 24, 24);
 }
@@ -627,13 +884,15 @@ void PageView::setDropActive(bool active)
 void PageView::wheelEvent(QWheelEvent *event)
 {
     if (event->modifiers().testFlag(Qt::ControlModifier)) {
-        zoomBy(event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15);
+        const int direction = event->angleDelta().y() != 0 ? event->angleDelta().y()
+                                                           : event->pixelDelta().y();
+        zoomBy(direction > 0 ? 1.15 : 1.0 / 1.15);
         event->accept();
         return;
     }
 
     // 触控板给 pixelDelta（已是像素），普通滚轮给 angleDelta（120 = 一格）。
-    // 不再交给 QGraphicsView：它一格会滚掉好几行，短页面上几乎等于整页。
+    // 连续画布直接滚动；滚动距离随连续滚动量加速，快速翻很多页时不至于太慢。
     const bool fromAngle = event->pixelDelta().isNull();
     QPoint delta = fromAngle ? event->angleDelta() : event->pixelDelta();
     if (event->modifiers().testFlag(Qt::ShiftModifier) && delta.x() == 0)
@@ -643,49 +902,31 @@ void PageView::wheelEvent(QWheelEvent *event)
         return;
     }
 
-    const auto toPixels = [fromAngle](int value) {
-        return fromAngle ? qRound(value * 0.75) : value;
-    };
-    const int dx = toPixels(delta.x());
-    const int dy = toPixels(delta.y());
+    int dx = delta.x();
+    int dy = delta.y();
 
-    if (event->phase() == Qt::ScrollBegin)
-        m_wheelOverscroll = 0;
-
-    auto *hbar = horizontalScrollBar();
-    if (dx != 0 && hbar->maximum() > hbar->minimum())
-        hbar->setValue(hbar->value() - dx);
-
-    auto *bar = verticalScrollBar();
-    const bool scrollable = bar->maximum() > bar->minimum();
-    const bool atTop = !scrollable || bar->value() <= bar->minimum();
-    const bool atBottom = !scrollable || bar->value() >= bar->maximum();
-    const bool towardEdge = dy > 0 ? atTop : atBottom;
-
-    if (dy == 0) {
-        event->accept();
-        return;
+    const int sign = dy != 0 ? (dy > 0 ? 1 : -1) : (dx > 0 ? 1 : -1);
+    if (event->phase() == Qt::ScrollBegin) {
+        m_wheelRun = 0;
+        m_wheelSign = 0;
+        m_wheelTimer.invalidate();
     }
+    const qint64 gap = m_wheelTimer.isValid() ? m_wheelTimer.elapsed() : 100000;
+    m_wheelTimer.restart();
+    if (gap > 180 || sign != m_wheelSign)
+        m_wheelRun = 0;
+    m_wheelSign = sign;
 
-    if (!towardEdge) {
-        bar->setValue(bar->value() - dy);
-        m_wheelOverscroll = 0;
-        event->accept();
-        return;
-    }
+    const double cap = fromAngle ? 3.0 : 1.0;
+    const double boost = 1.0 + qMin(cap, m_wheelRun / 360.0);
+    m_wheelRun += qAbs(dy != 0 ? dy : dx);
+    dx = qRound(dx * boost);
+    dy = qRound(dy * boost);
 
-    // 已经贴边：累计滚动量，够一次翻页才翻，避免轻轻一碰就跳页。
-    if ((m_wheelOverscroll > 0) != (dy > 0))
-        m_wheelOverscroll = 0;
-    m_wheelOverscroll += dy;
-
-    constexpr int kPageFlipThreshold = 150;
-    if (qAbs(m_wheelOverscroll) >= kPageFlipThreshold
-        && (!m_wheelClock.isValid() || m_wheelClock.elapsed() >= 500)) {
-        m_wheelClock.restart();
-        m_wheelOverscroll = 0;
-        emit pageStepRequested(dy < 0 ? 1 : -1);
-    }
+    if (dx != 0)
+        horizontalScrollBar()->setValue(horizontalScrollBar()->value() - dx);
+    if (dy != 0)
+        verticalScrollBar()->setValue(verticalScrollBar()->value() - dy);
     event->accept();
 }
 
@@ -709,17 +950,15 @@ void PageView::keyPressEvent(QKeyEvent *event)
             return;
         }
     }
-    if (event->key() == Qt::Key_PageDown || event->key() == Qt::Key_PageUp) {
-        auto *bar = verticalScrollBar();
-        const bool down = event->key() == Qt::Key_PageDown;
-        const bool scrollable = bar->maximum() > bar->minimum();
-        const bool atEdge = down ? bar->value() >= bar->maximum()
-                                 : bar->value() <= bar->minimum();
-        if (!scrollable || atEdge) {
-            emit pageStepRequested(down ? 1 : -1);
-            event->accept();
-            return;
-        }
+    if (event->key() == Qt::Key_PageDown || event->key() == Qt::Key_PageUp
+        || event->key() == Qt::Key_Space) {
+        const bool up = event->key() == Qt::Key_PageUp
+                        || (event->key() == Qt::Key_Space
+                            && event->modifiers().testFlag(Qt::ShiftModifier));
+        const int step = qRound(viewport()->height() * 0.88);
+        verticalScrollBar()->setValue(verticalScrollBar()->value() + (up ? -step : step));
+        event->accept();
+        return;
     }
     QGraphicsView::keyPressEvent(event);
 }
@@ -750,6 +989,11 @@ void PageView::mousePressEvent(QMouseEvent *event)
 
     const int hit = blockAt(pos);
     const bool ctrl = event->modifiers().testFlag(Qt::ControlModifier);
+    if (hit >= 0) {
+        const int page = m_flat.at(hit).page;
+        if (page != m_currentPage)
+            setCurrentPageInternal(page, !ctrl); // Ctrl 框选不能移动画布
+    }
 
     if (ctrl) {
         // Ctrl：点一下切换单个块，拖动则从当前位置拉框批量加选。
@@ -763,7 +1007,7 @@ void PageView::mousePressEvent(QMouseEvent *event)
     if (hit >= 0) {
         m_anchor = hit;
         applySelection(QSet<int>{hit});
-        emit blockClicked(hit);
+        emit blockClicked(localBlock(hit));
         return;
     }
 
@@ -775,10 +1019,16 @@ void PageView::mousePressEvent(QMouseEvent *event)
 void PageView::mouseMoveEvent(QMouseEvent *event)
 {
     if (m_textDragging) {
+        // 拖到视口上下边缘时自动滚动，方便跨页连续选择。
+        const int edge = 26;
+        if (event->pos().y() < edge)
+            verticalScrollBar()->setValue(verticalScrollBar()->value() - 24);
+        else if (event->pos().y() > viewport()->height() - edge)
+            verticalScrollBar()->setValue(verticalScrollBar()->value() + 24);
+
         const int offset = textOffsetAt(mapToScene(event->pos()));
-        if (offset >= 0) {
+        if (offset >= 0)
             setTextRange(qMin(m_textAnchor, offset), qMax(m_textAnchor, offset), offset);
-        }
         event->accept();
         return;
     }
@@ -833,10 +1083,15 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     }
 
     const int hit = blockAt(event->pos());
+    if (hit >= 0) {
+        const int page = m_flat.at(hit).page;
+        if (page != m_currentPage)
+            setCurrentPageInternal(page, true);
+    }
     if (hit >= 0 && !m_selection.contains(hit)) {
         m_anchor = hit;
         applySelection(QSet<int>{hit});
-        emit blockClicked(hit);
+        emit blockClicked(localBlock(hit));
     }
 
     QMenu menu(this);
@@ -862,10 +1117,10 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
 void PageView::drawForeground(QPainter *painter, const QRectF &rect)
 {
     QGraphicsView::drawForeground(painter, rect);
-    paintTextSelection(painter);
+    paintTextSelection(painter, rect);
 }
 
-void PageView::paintTextSelection(QPainter *painter) const
+void PageView::paintTextSelection(QPainter *painter, const QRectF &exposed) const
 {
     if (m_textBegin < 0 && m_textCaret < 0)
         return;
@@ -878,11 +1133,12 @@ void PageView::paintTextSelection(QPainter *painter) const
     caretPen.setCosmetic(true);
     bool caretDrawn = false;
 
-    for (int block : m_order) {
-        if (block < 0 || block >= m_textStart.size() || m_textStart.at(block) < 0)
+    for (int blockIndex = 0; blockIndex < m_flat.size(); ++blockIndex) {
+        const FlatBlock &block = m_flat.at(blockIndex);
+        if (block.textStart < 0)
             continue;
-        const int blockStart = m_textStart.at(block);
-        const int blockEnd = blockStart + m_texts.at(block).size();
+        const int blockStart = block.textStart;
+        const int blockEnd = blockStart + block.text.size();
 
         if (m_textHasSelection) {
             if (blockStart >= m_textEnd || blockEnd <= m_textBegin)
@@ -891,11 +1147,11 @@ void PageView::paintTextSelection(QPainter *painter) const
             continue;
         }
 
-        const QRectF box = blockBox(block);
-        if (box.isEmpty() || box.width() <= 0)
+        const QRectF box = block.box;
+        if (box.isEmpty() || box.width() <= 0 || !box.intersects(exposed))
             continue;
 
-        QTextLayout layout(m_texts.at(block), textFontFor(block, box));
+        QTextLayout layout(block.text, textFontFor(blockIndex, box));
         layoutTextLines(layout, box.width());
 
         for (int i = 0; i < layout.lineCount(); ++i) {
@@ -936,8 +1192,10 @@ void PageView::leaveEvent(QEvent *event)
 void PageView::resizeEvent(QResizeEvent *event)
 {
     QGraphicsView::resizeEvent(event);
-    if (m_fitPending)
+    if (m_fitMode && !m_pages.isEmpty())
         fitWidth();
+    else
+        ensureVisiblePages();
 }
 
 void PageView::paintEvent(QPaintEvent *event)
@@ -957,24 +1215,20 @@ void PageView::paintEvent(QPaintEvent *event)
     painter.setBrush(veil);
     painter.drawRoundedRect(area, 14, 14);
 
-    QColor fill = accent;
-    fill.setAlpha(24);
-    painter.setBrush(fill);
-    QPen border(accent, 1.8, Qt::DashLine);
-    border.setDashPattern({7, 5});
-    painter.setPen(border);
-    painter.drawRoundedRect(area.adjusted(0.5, 0.5, -0.5, -0.5), 14, 14);
+    QPen dashed(accent, 1.6, Qt::DashLine);
+    dashed.setDashPattern({6, 5});
+    painter.setPen(dashed);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawRoundedRect(area.adjusted(1, 1, -1, -1), 14, 14);
 
     QFont title = font();
-    title.setPointSizeF(title.pointSizeF() + 1.5);
+    title.setPointSizeF(title.pointSizeF() * 1.25);
     title.setBold(true);
     QFont small = font();
-    small.setPointSizeF(small.pointSizeF() * 0.95);
-    const QFontMetrics titleMetrics(title);
-    const QFontMetrics smallMetrics(small);
-
+    QFontMetrics titleMetrics(title);
+    QFontMetrics smallMetrics(small);
     const QString line1 = QStringLiteral("松开以打开");
-    const QString line2 = QStringLiteral("PDF · 图片 · 文件夹 · 可多选");
+    const QString line2 = QStringLiteral("PDF / 图片 / 图片文件夹");
     const int textWidth = qMax(titleMetrics.horizontalAdvance(line1),
                                smallMetrics.horizontalAdvance(line2));
     const int boxWidth = qMin(area.width() - 24, textWidth + 56);
@@ -1003,41 +1257,53 @@ void PageView::paintEvent(QPaintEvent *event)
 
 void PageView::fitWidth()
 {
-    if (!m_pixmap || m_image.isNull())
-        return;
-    const int available = viewport()->width() - 24;
-    if (available <= 0)
-        return;
-    const double factor = double(available) / m_image.width();
-    resetTransform();
-    scale(factor, factor);
-    m_zoom = factor;
-    m_fitPending = false;
+    m_fitMode = true;
+    if (!m_pages.isEmpty()) {
+        const QRectF rect = m_scene->sceneRect();
+        const qreal available = viewport()->width() - kHorizontalPadding * 2;
+        if (rect.width() <= 0 || available <= 0)
+            return;
+        const QPointF anchor = mapToScene(viewport()->rect().center());
+        const qreal factor = available / rect.width();
+        m_navigating = true;
+        resetTransform();
+        scale(factor, factor);
+        m_zoom = factor;
+        if (m_currentPage >= 0)
+            centerOn(anchor);
+        m_navigating = false;
+        ensureVisiblePages();
+        if (m_currentPage >= 0)
+            updateCurrentPageFromScroll();
+    }
 }
 
 void PageView::zoomBy(double factor)
 {
-    if (!m_pixmap)
+    if (m_pages.isEmpty())
         return;
     const double next = m_zoom * factor;
     if (next < 0.05 || next > 12.0)
         return;
+    m_fitMode = false;
+    const QPointF anchor = mapToScene(viewport()->rect().center());
     scale(factor, factor);
+    centerOn(anchor);
     m_zoom = next;
-    m_fitPending = false;
+    ensureVisiblePages();
+    updateCurrentPageFromScroll();
 }
 
 void PageView::resetZoom()
 {
+    if (m_pages.isEmpty())
+        return;
+    m_fitMode = false;
+    const QPointF anchor = mapToScene(viewport()->rect().center());
     resetTransform();
     m_zoom = 1.0;
-    m_fitPending = false;
-}
-
-void PageView::updateBackground()
-{
-    QColor background = palette().color(QPalette::Window);
-    background = background.lightness() < 128 ? background.darker(115)
-                                              : background.darker(108);
-    setBackgroundBrush(background);
+    centerOn(anchor);
+    ensureVisiblePages();
+    if (m_currentPage >= 0)
+        updateCurrentPageFromScroll();
 }

@@ -159,7 +159,7 @@ void MainWindow::buildUi()
     m_selLabel = new QLabel(this);
     m_selLabel->hide();
     m_hintLabel = new QLabel(
-        QStringLiteral("拖入 PDF / 图片 / 文件夹 · Ctrl+滚轮缩放 · PgUp/PgDn 翻页"), this);
+        QStringLiteral("拖入 PDF / 图片 / 文件夹 · Ctrl+滚轮缩放 · PgUp/PgDn 滚动"), this);
     m_hintLabel->setForegroundRole(QPalette::PlaceholderText);
     statusBar()->addWidget(m_statsLabel, 1);
     statusBar()->addPermanentWidget(m_selLabel);
@@ -167,8 +167,12 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(m_progress);
 
     connect(m_pageList, &QListWidget::currentRowChanged, this, [this](int row) {
-        if (row >= 0)
+        if (row < 0 || m_syncingPage)
+            return;
+        if (m_view->currentPage() == row)
             showPage(row);
+        else
+            m_view->setCurrentPage(row);
     });
     connect(m_view, &PageView::selectionChanged, this, [this] { syncCardsFromView(); });
     connect(m_view, &PageView::textSelectionChanged, this, [this](int blocks, int chars) {
@@ -183,7 +187,17 @@ void MainWindow::buildUi()
         statusBar()->showMessage(
             QStringLiteral("已复制 %1 个块 · %2 字").arg(blocks).arg(chars), 2500);
     });
-    connect(m_view, &PageView::pageStepRequested, this, [this](int delta) { stepPage(delta); });
+    connect(m_view, &PageView::currentPageChanged, this, [this](int page) {
+        if (page < 0 || page >= m_doc.count())
+            return;
+        m_syncingPage = true;
+        if (m_pageList->currentRow() != page)
+            m_pageList->setCurrentRow(page);
+        if (m_pageSpin)
+            m_pageSpin->setValue(page + 1);
+        m_syncingPage = false;
+        showPage(page);
+    });
     connect(m_view, &PageView::blockClicked, this, [this](int index) {
         if (m_view->selection().contains(index))
             m_blocks->scrollToBlock(index);
@@ -294,6 +308,8 @@ void MainWindow::buildActions()
     m_pageSpin->setToolTip(QStringLiteral("当前页 / 总页数，可直接输入页码跳转"));
     toolbar->addWidget(m_pageSpin);
     connect(m_pageSpin, &QSpinBox::valueChanged, this, [this](int value) {
+        if (m_syncingPage)
+            return;
         goToPage(value - 1);
     });
 
@@ -536,6 +552,7 @@ void MainWindow::addPagesToUi()
         item->setTextAlignment(Qt::AlignHCenter);
         item->setSizeHint(QSize(140, 190));
     }
+    m_view->setDocument(&m_doc, m_showBoxes);
     m_thumbTimer->start();
     if (m_doc.count() > 0)
         m_pageList->setCurrentRow(0);
@@ -559,13 +576,7 @@ void MainWindow::showPage(int index)
 {
     if (index < 0 || index >= m_doc.count())
         return;
-    const QImage image = m_doc.ensureImage(index);
-    m_pageImage = image;
-    const PageEntry &entry = m_doc.page(index);
-    const bool rich = entry.result.ok()
-                      && entry.result.purpose == QStringLiteral("rich_layout_recognition");
-    const QVector<ocr::Block> noBlocks;
-    m_view->setPage(image, rich ? entry.result.blocks : noBlocks, m_showBoxes);
+    m_pageImage = m_doc.ensureImage(index);
     updatePanels();
     updatePageNav();
 }
@@ -575,11 +586,7 @@ void MainWindow::goToPage(int index)
     if (m_doc.count() == 0)
         return;
     index = qBound(0, index, m_doc.count() - 1);
-    if (m_pageList->currentRow() == index) {
-        showPage(index);
-        return;
-    }
-    m_pageList->setCurrentRow(index);
+    m_view->setCurrentPage(index);
     if (auto *item = m_pageList->item(index))
         m_pageList->scrollToItem(item, QAbstractItemView::PositionAtCenter);
 }
@@ -589,7 +596,10 @@ void MainWindow::stepPage(int delta)
     if (m_doc.count() == 0)
         return;
     const int current = m_pageList->currentRow();
-    goToPage((current < 0 ? 0 : current) + delta);
+    const int target = (current < 0 ? 0 : current) + delta;
+    if (target < 0 || target >= m_doc.count())
+        return;
+    goToPage(target);
 }
 
 void MainWindow::updatePageNav()
@@ -800,7 +810,7 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
     const bool rich = result.purpose == QStringLiteral("rich_layout_recognition");
     const bool empty = result.ok() && rich && result.blocks.isEmpty()
                        && !ocr::hasText(result.payload);
-    const bool hasInk = OcrQueue::pageHasInk(m_doc.ensureImage(page));
+    const bool hasInk = empty ? OcrQueue::pageHasInk(m_doc.ensureImage(page)) : false;
 
     if (auto *item = m_pageList->item(page)) {
         if (!result.ok()) {
@@ -861,6 +871,7 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
             2500);
     }
 
+    m_view->refreshPage(page);
     if (page == m_pageList->currentRow())
         showPage(page);
     updateStats();
@@ -1011,6 +1022,7 @@ void MainWindow::injectMockResult(const QString &jsonPath)
     if (m_doc.count() > 0)
         m_doc.page(0).result = result;
     refreshPageList(0);
+    m_view->refreshPage(0);
     showPage(0);
     updateStats();
 }

@@ -48,7 +48,8 @@ int main(int argc, char *argv[])
     QCommandLineOption darkOption(QStringLiteral("dark"), QStringLiteral("强制深色方案（调试用）"));
     QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
     parser.addOptions({openOption, ocrOption, ocrCurrentOption, screenshotOption, mockOption, purposeOption,
-                       selectOption, textSelectOption, dropHintOption, pageOption, darkOption, lightOption});
+                       selectOption, textSelectOption, dropHintOption, pageOption, darkOption,
+                       lightOption});
     parser.process(app);
 
     if (parser.isSet(darkOption))
@@ -71,8 +72,9 @@ int main(int argc, char *argv[])
     if (parser.isSet(pageOption)) {
         bool ok = false;
         const int page = parser.value(pageOption).toInt(&ok);
-        if (ok)
-            window.goToPage(page - 1);
+        if (ok) {
+            QTimer::singleShot(0, &window, [&window, page] { window.goToPage(page - 1); });
+        }
     }
 
     if (parser.isSet(selectOption)) {

@@ -121,5 +121,6 @@ private:
     bool m_showBoxes = true;
     bool m_batchMode = false;
     bool m_syncing = false;
+    bool m_syncingPage = false;
     bool m_dropHint = false;
 };

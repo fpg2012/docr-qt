@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <QDir>
 #include <QFileInfo>
+#include <QImageReader>
 
 QStringList Document::imageNameFilters()
 {
@@ -38,6 +39,8 @@ bool Document::addPdf(const QString &path, int dpi, QString *error)
         entry.sourcePath = path;
         entry.pdf = pdf;
         entry.pdfPage = i;
+        if (std::unique_ptr<Poppler::Page> page = std::unique_ptr<Poppler::Page>(pdf->page(i)))
+            entry.pdfSize = page->pageSizeF();
         m_pages.append(entry);
     }
     m_dpi = dpi;
@@ -48,16 +51,17 @@ bool Document::addPdf(const QString &path, int dpi, QString *error)
 
 bool Document::addImage(const QString &path, QString *error)
 {
-    QImage image(path);
-    if (image.isNull()) {
+    QImageReader reader(path);
+    if (!reader.canRead()) {
         if (error)
             *error = QStringLiteral("无法读取图片：%1").arg(path);
         return false;
     }
+    // 只记录尺寸，等页面进入可视区再解码整图；图片序列不会在打开时占满内存。
     PageEntry entry;
     entry.label = QFileInfo(path).fileName();
     entry.sourcePath = path;
-    entry.image = image;
+    entry.imageSize = reader.size();
     m_pages.append(entry);
     if (m_path.isEmpty())
         m_path = QFileInfo(path).absolutePath();
@@ -152,8 +156,13 @@ QImage Document::ensureImage(int index)
     PageEntry &entry = m_pages[index];
     if (!entry.image.isNull())
         return entry.image;
-    if (entry.pdf)
+    if (entry.pdf) {
         entry.image = renderPdfPage(entry.pdf, entry.pdfPage);
+    } else if (!entry.sourcePath.isEmpty()) {
+        // 连续视图释放后重新解码；尺寸和首次打开时保持一致。
+        QImageReader reader(entry.sourcePath);
+        entry.image = reader.read();
+    }
     return entry.image;
 }
 
@@ -164,9 +173,59 @@ QImage Document::ensureThumb(int index)
     PageEntry &entry = m_pages[index];
     if (!entry.thumb.isNull())
         return entry.thumb;
-    const QImage image = ensureImage(index);
-    if (image.isNull())
+
+    // 缩略图单独走低分辨率路径，不复用整页缓存：打开大文档时不会因为侧栏缩略图
+    // 把每一页都按 150 dpi 渲染、常驻内存。
+    if (entry.pdf) {
+        std::unique_ptr<Poppler::Page> page(entry.pdf->page(entry.pdfPage));
+        if (page) {
+            const QImage image = page->renderToImage(72, 72);
+            if (!image.isNull())
+                entry.thumb = image.scaledToHeight(180, Qt::SmoothTransformation);
+            return entry.thumb;
+        }
         return {};
-    entry.thumb = image.scaledToHeight(180, Qt::SmoothTransformation);
+    }
+
+    if (!entry.sourcePath.isEmpty()) {
+        QImageReader reader(entry.sourcePath);
+        const QSize size = reader.size();
+        if (size.isValid() && size.height() > 0) {
+            const int width = qMax(1, qRound(size.width() * 180.0 / size.height()));
+            reader.setScaledSize(QSize(width, 180));
+        }
+        const QImage image = reader.read();
+        if (!image.isNull()) {
+            entry.thumb = image.height() == 180
+                              ? image
+                              : image.scaledToHeight(180, Qt::SmoothTransformation);
+            return entry.thumb;
+        }
+    }
+
+    const QImage image = ensureImage(index);
+    if (!image.isNull())
+        entry.thumb = image.scaledToHeight(180, Qt::SmoothTransformation);
     return entry.thumb;
+}
+
+QSizeF Document::pageSize(int index) const
+{
+    if (index < 0 || index >= m_pages.size())
+        return {};
+    const PageEntry &entry = m_pages.at(index);
+    if (entry.pdf && !entry.pdfSize.isEmpty())
+        return entry.pdfSize * (m_dpi / 72.0);
+    if (!entry.imageSize.isEmpty())
+        return entry.imageSize;
+    if (!entry.image.isNull())
+        return entry.image.size();
+    return QSizeF(1000, 1414);
+}
+
+void Document::releaseImage(int index)
+{
+    if (index < 0 || index >= m_pages.size())
+        return;
+    m_pages[index].image = QImage();
 }
