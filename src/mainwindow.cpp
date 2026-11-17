@@ -38,6 +38,7 @@
 #include <QUrl>
 
 #include "pageview.h"
+#include "theme.h"
 
 namespace {
 
@@ -74,7 +75,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     setAcceptDrops(true);
     resize(1480, 940);
-    setWindowIcon(QIcon(QStringLiteral(":/icons/app.svg")));
+    setWindowIcon(theme::appIcon());
     setWindowTitle(QStringLiteral("docr-qt"));
 }
 
@@ -137,7 +138,10 @@ void MainWindow::buildUi()
     m_progress->setVisible(false);
     m_hintLabel = new QLabel(
         QStringLiteral("拖入 PDF / 图片或文件夹 · Ctrl+滚轮缩放"), this);
-    m_hintLabel->setStyleSheet(QStringLiteral("color:#9aa0a6;"));
+    QPalette hintPalette = m_hintLabel->palette();
+    hintPalette.setColor(QPalette::WindowText,
+                         palette().color(QPalette::PlaceholderText));
+    m_hintLabel->setPalette(hintPalette);
     statusBar()->addWidget(m_statsLabel, 1);
     statusBar()->addPermanentWidget(m_hintLabel);
     statusBar()->addPermanentWidget(m_progress);
@@ -165,7 +169,8 @@ void MainWindow::buildActions()
 
     auto make = [this](const QString &icon, const QString &text,
                        const QKeySequence &shortcut, auto &&slot) {
-        auto *action = new QAction(QIcon(QStringLiteral(":/icons/%1.svg").arg(icon)), text, this);
+        auto *action = new QAction(theme::icon(icon), text, this);
+        m_themedActions.append({action, icon});
         if (!shortcut.isEmpty())
             action->setShortcut(shortcut);
         const QString tip = shortcut.isEmpty()
@@ -508,7 +513,7 @@ void MainWindow::updatePanels()
         const ocr::Block &block = blocks.at(i);
         auto *kindItem = new QTableWidgetItem(kindLabel(block.kind));
         QColor color = ocr::colorForKind(block.kind);
-        kindItem->setForeground(color.darker(140));
+        kindItem->setForeground(theme::tone(color));
         m_blockTable->setItem(i, 0, kindItem);
 
         QString position;
@@ -606,7 +611,7 @@ void MainWindow::pumpQueue()
         m_running.insert(page);
         if (auto *item = m_pageList->item(page)) {
             item->setText(QStringLiteral("%1 ⏳").arg(page + 1));
-            item->setForeground(QColor(245, 158, 11));
+            item->setForeground(theme::tone(QColor(245, 158, 11)));
         }
         encodeAndSubmit(page);
     }
@@ -649,10 +654,10 @@ void MainWindow::onResult(int page, int generation, const ocr::PageResult &resul
     if (auto *item = m_pageList->item(page)) {
         if (result.ok()) {
             item->setText(QStringLiteral("%1 ✓").arg(page + 1));
-            item->setForeground(QColor(34, 197, 94));
+            item->setForeground(theme::tone(QColor(34, 197, 94)));
         } else {
             item->setText(QStringLiteral("%1 ✕").arg(page + 1));
-            item->setForeground(QColor(239, 68, 68));
+            item->setForeground(theme::tone(QColor(239, 68, 68)));
             item->setToolTip(QStringLiteral("%1\n%2").arg(m_doc.page(page).label, result.error));
         }
     }
@@ -786,4 +791,34 @@ void MainWindow::closeEvent(QCloseEvent *event)
         m_running.clear();
     }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::applyTheme()
+{
+    if (m_applyingTheme)
+        return;
+    m_applyingTheme = true;
+
+    qApp->setStyleSheet(theme::styleSheet(qApp->palette()));
+    for (const auto &entry : m_themedActions)
+        entry.first->setIcon(theme::icon(entry.second));
+
+    if (m_hintLabel) {
+        QPalette hintPalette = m_hintLabel->palette();
+        hintPalette.setColor(QPalette::WindowText,
+                             palette().color(QPalette::PlaceholderText));
+        m_hintLabel->setPalette(hintPalette);
+    }
+    if (m_view)
+        m_view->updateBackground();
+
+    m_applyingTheme = false;
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ApplicationPaletteChange
+        || event->type() == QEvent::PaletteChange)
+        applyTheme();
+    QMainWindow::changeEvent(event);
 }

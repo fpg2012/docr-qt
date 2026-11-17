@@ -15,6 +15,7 @@ public:
     void clearPage();
     void updateBoxes(const QVector<ocr::Block> &blocks);
     void setBoxesVisible(bool visible);
+    void updateBackground();
 
     void fitWidth();
     void zoomBy(double factor);

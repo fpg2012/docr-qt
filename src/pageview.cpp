@@ -18,7 +18,7 @@ PageView::PageView(QWidget *parent)
     setResizeAnchor(QGraphicsView::AnchorViewCenter);
     setAlignment(Qt::AlignCenter);
     setFrameShape(QFrame::NoFrame);
-    setBackgroundBrush(QColor(38, 40, 44));
+    updateBackground();
 }
 
 void PageView::setPage(const QImage &image, const QVector<ocr::Block> &blocks, bool showBoxes)
@@ -188,4 +188,12 @@ void PageView::resizeEvent(QResizeEvent *event)
     QGraphicsView::resizeEvent(event);
     if (m_fitPending)
         fitWidth();
+}
+
+void PageView::updateBackground()
+{
+    QColor background = palette().color(QPalette::Window);
+    background = background.lightness() < 128 ? background.darker(115)
+                                              : background.darker(108);
+    setBackgroundBrush(background);
 }

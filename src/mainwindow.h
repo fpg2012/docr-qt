@@ -1,7 +1,9 @@
 // 主窗口：页面列表、叠加视图、识别结果与设置。
 #pragma once
 
+#include <QList>
 #include <QMainWindow>
+#include <QPair>
 #include <QQueue>
 #include <QSet>
 
@@ -37,6 +39,7 @@ protected:
     void dragEnterEvent(QDragEnterEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private:
     void buildUi();
@@ -78,6 +81,9 @@ private:
     QLabel *m_hintLabel = nullptr;
     QProgressBar *m_progress = nullptr;
     QTimer *m_thumbTimer = nullptr;
+    QList<QPair<QAction *, QString>> m_themedActions;
+    bool m_applyingTheme = false;
+    void applyTheme();
 
     QQueue<int> m_pending;
     QSet<int> m_running;

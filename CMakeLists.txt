@@ -9,10 +9,12 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Gui)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(POPPLER_QT6 REQUIRED IMPORTED_TARGET poppler-qt6)
+pkg_check_modules(QT6SVG REQUIRED IMPORTED_TARGET Qt6Svg)
 
 add_executable(docr-qt
     src/main.cpp
     src/ocr.cpp
+    src/theme.cpp
     src/document.cpp
     src/pageview.cpp
     src/mainwindow.cpp
@@ -24,6 +26,7 @@ target_link_libraries(docr-qt PRIVATE
     Qt6::Network
     Qt6::Gui
     PkgConfig::POPPLER_QT6
+    PkgConfig::QT6SVG
 )
 
 install(TARGETS docr-qt RUNTIME DESTINATION bin)

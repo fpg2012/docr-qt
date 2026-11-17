@@ -1,10 +1,13 @@
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QFileInfo>
+#include <QGuiApplication>
+#include <QStyleHints>
 #include <QIcon>
 #include <QTimer>
 
 #include "mainwindow.h"
+#include "theme.h"
 
 int main(int argc, char *argv[])
 {
@@ -12,25 +15,6 @@ int main(int argc, char *argv[])
     QApplication::setApplicationName(QStringLiteral("docr-qt"));
     QApplication::setDesktopFileName(QStringLiteral("docr-qt"));
     QApplication::setWindowIcon(QIcon(QStringLiteral(":/icons/app.svg")));
-
-    app.setStyleSheet(QStringLiteral(R"(
-QToolBar { background: #f6f7f9; border: none; border-bottom: 1px solid #e4e7eb; padding: 5px 8px; spacing: 3px; }
-QToolBar::separator { background: #d9dde3; width: 1px; margin: 5px 7px; }
-QToolButton { border: none; border-radius: 7px; padding: 5px; }
-QToolButton:hover { background: #e9edf2; }
-QToolButton:pressed { background: #dde3ea; }
-QToolButton:checked { background: #dfe5ec; }
-QMenuBar { background: #f6f7f9; border-bottom: 1px solid #e4e7eb; padding: 2px 4px; }
-QMenuBar::item { padding: 4px 9px; border-radius: 5px; }
-QMenuBar::item:selected { background: #e9edf2; }
-QStatusBar { background: #f6f7f9; border-top: 1px solid #e4e7eb; }
-QStatusBar::item { border: none; }
-QComboBox { padding: 3px 8px; border: 1px solid #d5dae1; border-radius: 6px; background: white; }
-QComboBox:hover { border-color: #b9c0c9; }
-QDockWidget::title { background: #f6f7f9; padding: 5px 8px; border-bottom: 1px solid #e4e7eb; }
-QTabWidget::pane { border: none; }
-QTabBar::tab { padding: 6px 12px; }
-)"));
     QApplication::setOrganizationName(QStringLiteral("docr-qt"));
 
     QCommandLineParser parser;
@@ -48,8 +32,18 @@ QTabBar::tab { padding: 6px 12px; }
     QCommandLineOption purposeOption(QStringLiteral("purpose"),
                                      QStringLiteral("rich_layout_recognition | text_recognition"),
                                      QStringLiteral("purpose"));
-    parser.addOptions({openOption, ocrOption, screenshotOption, mockOption, purposeOption});
+    QCommandLineOption darkOption(QStringLiteral("dark"), QStringLiteral("强制深色方案（调试用）"));
+    QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
+    parser.addOptions({openOption, ocrOption, screenshotOption, mockOption, purposeOption,
+                       darkOption, lightOption});
     parser.process(app);
+
+    if (parser.isSet(darkOption))
+        QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Dark);
+    else if (parser.isSet(lightOption))
+        QGuiApplication::styleHints()->setColorScheme(Qt::ColorScheme::Light);
+
+    app.setStyleSheet(theme::styleSheet(app.palette()));
 
     MainWindow window;
     window.show();

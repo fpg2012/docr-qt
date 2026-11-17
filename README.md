@@ -1,6 +1,8 @@
 # docr-qt
 
-![截图](docs/screenshot.png)
+![截图（深色）](docs/screenshot-dark.png)
+
+浅色方案见 `docs/screenshot-light.png`。
 
 DeepSeek OCR 的 Qt 6 桌面前端：导入 PDF 或图片序列，逐页调用
 `POST /v1/tools/ocr`，把返回的 `<|ref|>/<|box|>` 版面坐标叠加显示在页面上。
@@ -47,8 +49,9 @@ cmake --build build -j
 | 双向箭头 / ± 放大镜 / 角标 | 适应宽度 / 放大 / 缩小 / 原始大小 | `F` / `Ctrl++` / `Ctrl+-` / — |
 | 滑杆 | 设置 | `Ctrl+,` |
 
-图标为手写的 24×24 线性 SVG（`assets/icons/`），应用图标是深色圆角方块 + 扫描角标
-（`assets/app.svg`）。`cmake --install` 会把图标装到 `share/icons/hicolor/scalable/apps/docr-qt.svg`，
+图标为手写的 24×24 线性 SVG（`assets/icons/`），描边用 `currentColor`，运行时按
+`QPalette::WindowText` 染色，浅色/深色下都保持对比度；应用图标是深色圆角方块 + 扫描角标
+（`assets/app.svg`，带浅色描边以便在深色标题栏上可辨）。`cmake --install` 会把图标装到 `share/icons/hicolor/scalable/apps/docr-qt.svg`，
 并安装 `assets/docr-qt.desktop`。
 
 ## 使用
@@ -61,6 +64,14 @@ cmake --build build -j
   颜色区分类型；悬停显示文本，点击框会在「版面块」表里选中对应行，反之亦然。
 - **缩放**：`Ctrl+滚轮` 缩放，`F` 适应宽度，`Ctrl+0` 原始大小。
 - **导出**：「文件 → 导出 Markdown / JSON」，或 `Ctrl+C` 复制本页文本。
+
+## 主题
+
+界面不写死颜色：工具栏、菜单栏、状态栏、下拉框和识别框高亮全部取自当前 `QPalette`
+（分隔线用 `Mid`，悬停/选中用 `Highlight` 的透明度变体），跟随系统浅色/深色方案。
+运行时切换系统主题会收到 `ApplicationPaletteChange`，图标与样式表即时重建。
+
+调试时可用 `--dark` / `--light` 强制方案（需要平台支持 `QStyleHints::setColorScheme`）。
 
 ## 配置
 
