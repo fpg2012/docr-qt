@@ -6,7 +6,7 @@
 #include <QStyledItemDelegate>
 #include <QVector>
 
-#include "ocr.h"
+#include "core/ocr.h"
 
 class QLabel;
 

@@ -64,6 +64,52 @@ bool Document::addImage(const QString &path, QString *error)
     return true;
 }
 
+QStringList Document::expandPaths(const QStringList &paths)
+{
+    QStringList files;
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (info.isDir()) {
+            QDir dir(path);
+            QStringList names = dir.entryList(imageNameFilters(), QDir::Files, QDir::NoSort);
+            QCollator collator;
+            collator.setNumericMode(true);
+            std::sort(names.begin(), names.end(),
+                      [&collator](const QString &a, const QString &b) {
+                          return collator.compare(a, b) < 0;
+                      });
+            for (const QString &name : names)
+                files << dir.filePath(name);
+        } else if (info.isFile()) {
+            files << info.absoluteFilePath();
+        }
+    }
+    return files;
+}
+
+bool Document::addPaths(const QStringList &paths, int dpi, DocumentLoadReport *report)
+{
+    const QStringList files = expandPaths(paths);
+    if (report) {
+        report->files = files;
+        report->errors.clear();
+    }
+    if (files.isEmpty())
+        return false;
+
+    m_dpi = dpi;
+    const int before = m_pages.size();
+    for (const QString &file : files) {
+        QString error;
+        const bool isPdf =
+            QFileInfo(file).suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0;
+        const bool ok = isPdf ? addPdf(file, dpi, &error) : addImage(file, &error);
+        if (!ok && report)
+            report->errors.append(error);
+    }
+    return m_pages.size() > before;
+}
+
 int Document::addImageDir(const QString &dir)
 {
     QDir d(dir);
@@ -111,7 +157,7 @@ QImage Document::ensureImage(int index)
     return entry.image;
 }
 
-QPixmap Document::ensureThumb(int index)
+QImage Document::ensureThumb(int index)
 {
     if (index < 0 || index >= m_pages.size())
         return {};
@@ -121,7 +167,6 @@ QPixmap Document::ensureThumb(int index)
     const QImage image = ensureImage(index);
     if (image.isNull())
         return {};
-    entry.thumb = QPixmap::fromImage(
-        image.scaledToHeight(180, Qt::SmoothTransformation));
+    entry.thumb = image.scaledToHeight(180, Qt::SmoothTransformation);
     return entry.thumb;
 }

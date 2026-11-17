@@ -3,7 +3,6 @@
 #include <QAction>
 #include <QApplication>
 #include <QClipboard>
-#include <QCollator>
 #include <QComboBox>
 #include <QDir>
 #include <QDockWidget>
@@ -23,6 +22,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPlainTextEdit>
+#include <QPixmap>
 #include <QProgressBar>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -35,11 +35,9 @@
 #include <QAbstractItemView>
 #include <QPalette>
 
-#include <algorithm>
-
 #include "blockcards.h"
-#include "exporters.h"
-#include "ocrdiagnostics.h"
+#include "core/exporters.h"
+#include "core/ocrdiagnostics.h"
 #include "pageview.h"
 #include "preferences.h"
 #include "theme.h"
@@ -464,26 +462,7 @@ bool MainWindow::loadPath(const QString &path)
 
 void MainWindow::openPaths(const QStringList &paths)
 {
-    QStringList files;
-    for (const QString &path : paths) {
-        const QFileInfo info(path);
-        if (info.isDir()) {
-            QDir dir(path);
-            QStringList names = dir.entryList(Document::imageNameFilters(), QDir::Files,
-                                              QDir::NoSort);
-            QCollator collator;
-            collator.setNumericMode(true);
-            std::sort(names.begin(), names.end(),
-                      [&collator](const QString &a, const QString &b) {
-                          return collator.compare(a, b) < 0;
-                      });
-            for (const QString &name : names)
-                files << dir.filePath(name);
-        } else if (info.isFile()) {
-            files << info.absoluteFilePath();
-        }
-    }
-
+    const QStringList files = Document::expandPaths(paths);
     if (files.isEmpty()) {
         statusBar()->showMessage(QStringLiteral("没有可打开的 PDF / 图片"), 4000);
         return;
@@ -503,21 +482,13 @@ void MainWindow::openPaths(const QStringList &paths)
     m_textView->clear();
     m_jsonView->clear();
 
-    QStringList errors;
-    for (const QString &file : files) {
-        QString error;
-        if (QFileInfo(file).suffix().compare(QStringLiteral("pdf"), Qt::CaseInsensitive) == 0) {
-            if (!m_doc.addPdf(file, m_dpi, &error))
-                errors << error;
-        } else if (!m_doc.addImage(file, &error)) {
-            errors << error;
-        }
-    }
-
+    DocumentLoadReport report;
+    m_doc.addPaths(files, m_dpi, &report);
     if (m_doc.count() == 0) {
         QMessageBox::warning(this, QStringLiteral("打开失败"),
-                             errors.isEmpty() ? QStringLiteral("没有可显示的页面")
-                                              : errors.join(QLatin1Char('\n')));
+                             report.errors.isEmpty()
+                                 ? QStringLiteral("没有可显示的页面")
+                                 : report.errors.join(QLatin1Char('\n')));
         setWindowTitle(QStringLiteral("docr-qt"));
         updatePanels();
         updatePageNav();
@@ -531,8 +502,9 @@ void MainWindow::openPaths(const QStringList &paths)
             ? QFileInfo(files.first()).fileName()
             : QStringLiteral("%1 个文件 · %2 页").arg(files.size()).arg(m_doc.count());
     setWindowTitle(QStringLiteral("docr-qt — %1").arg(title));
-    if (!errors.isEmpty())
-        statusBar()->showMessage(QStringLiteral("有 %1 个文件无法打开").arg(errors.size()), 5000);
+    if (!report.errors.isEmpty())
+        statusBar()->showMessage(
+            QStringLiteral("有 %1 个文件无法打开").arg(report.errors.size()), 5000);
 }
 
 void MainWindow::openFiles()
@@ -574,9 +546,9 @@ void MainWindow::ensureThumbs()
 {
     for (int i = 0; i < m_doc.count(); ++i) {
         if (m_doc.page(i).thumb.isNull()) {
-            const QPixmap thumb = m_doc.ensureThumb(i);
+            const QImage thumb = m_doc.ensureThumb(i);
             if (auto *item = m_pageList->item(i))
-                item->setIcon(QIcon(thumb));
+                item->setIcon(QIcon(QPixmap::fromImage(thumb)));
             return; // 一次一张，保持界面响应
         }
     }

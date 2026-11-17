@@ -13,7 +13,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 
-#include "ocr.h"
+#include "core/ocr.h"
 #include "theme.h"
 
 PreferencesDialog::PreferencesDialog(const Preferences &initial, QWidget *parent)

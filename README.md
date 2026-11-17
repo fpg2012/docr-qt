@@ -9,6 +9,8 @@ DeepSeek OCR 的 Qt 6 桌面前端：拖入 PDF 或图片序列，逐页调用
 `POST /v1/tools/ocr`，把返回的 `<|ref|>/<|box|>` 版面坐标叠加显示在页面上。
 识别结果按版面块做成卡片列表，支持框选、批量复制与连续选文本。
 
+同一套核心还提供 `docr-cli`，可以在无界面环境里批量识别并导出 JSON / 文本 / Markdown。
+
 ## 功能
 
 - **拖入即开**：PDF、图片、图片目录都可以直接拖进窗口，可多选、可混排。
@@ -18,6 +20,7 @@ DeepSeek OCR 的 Qt 6 桌面前端：拖入 PDF 或图片序列，逐页调用
 - **版面块卡片**：按类型着色、两行预览；图片块直接显示该区域的页面裁剪图。
 - **双向联动**：选中画布上的框会自动切到「版面块」并定位到对应卡片，反之亦然。
 - **主题跟随系统**：所有颜色来自 `QPalette`，浅色/深色都不写死颜色。
+- **GUI + CLI**：`docr-qt` 和 `docr-cli` 共用 `src/core` 的文档、OCR、导出与诊断逻辑。
 
 ## 验证结果（2026-11-17）
 
@@ -45,8 +48,11 @@ Debian/Ubuntu 参考：`qt6-base-dev libpoppler-qt6-dev cmake g++`
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/docr-qt
+./build/docr-qt      # 桌面端
+./build/docr-cli --help
 ```
+
+`cmake --build` 会生成 `build/docr-qt` 和 `build/docr-cli` 两个可执行文件。
 
 ## 界面
 
@@ -180,19 +186,20 @@ API Key 解析顺序：
 
 | 文件 | 职责 |
 |---|---|
-| `document.*` | PDF / 图片模型，按需渲染与缩略图 |
-| `ocr.*` | DeepSeek OCR 客户端、multipart 组包、标记解析 |
-| `ocrqueue.*` | OCR 并发队列、取消、空结果自动重试 |
-| `pageview.*` | 画布、识别框、Ctrl 框选、字符级文本选择 |
-| `blockcards.*` | 「版面块」卡片列表与图片裁剪 |
-| `preferences.*` | 首选项对话框与关于对话框 |
-| `exporters.*` | Markdown / JSON 导出 |
-| `ocrdiagnostics.*` | 空结果诊断（原始响应、上传图、元数据）落盘 |
-| `theme.*` | QPalette 派生颜色、SVG 图标染色 |
-| `mainwindow.*` | 窗口编排：工具栏、菜单、dock、页面/结果/选择同步 |
+| `src/core/document.*` | PDF / 图片模型，按需渲染、缩略图、路径展开 |
+| `src/core/ocr.*` | DeepSeek OCR 客户端、multipart 组包、标记解析 |
+| `src/core/ocrqueue.*` | OCR 并发队列、取消、空结果自动重试 |
+| `src/core/exporters.*` | Markdown / JSON 导出 |
+| `src/core/ocrdiagnostics.*` | 空结果诊断（原始响应、上传图、元数据）落盘 |
+| `src/pageview.*` | 画布、识别框、Ctrl 框选、字符级文本选择 |
+| `src/blockcards.*` | 「版面块」卡片列表与图片裁剪 |
+| `src/preferences.*` | 首选项对话框与关于对话框 |
+| `src/theme.*` | QPalette 派生颜色、SVG 图标染色 |
+| `src/mainwindow.*` | 窗口编排：工具栏、菜单、dock、页面/结果/选择同步 |
+| `src/cli/main.cpp` | `docr-cli`：共享 core 的命令行入口 |
 
-`mainwindow.cpp` 仍是组装层，保留较多 Qt 控件接线；OCR 调度、对话框、导出、诊断等
-独立职责已拆到上面的模块。
+`src/core` 只依赖 Qt Core/Gui/Network 和 poppler-qt6，不依赖 Widgets；缩略图在 core 里是
+`QImage`，桌面端再转成 `QPixmap`。`mainwindow.cpp` 仍是组装层，保留较多 Qt 控件接线。
 
 ## 设计说明
 
@@ -211,7 +218,32 @@ API Key 解析顺序：
 - 识别阶段失败可能出现在 **HTTP 200 的响应体**里（`{"error": {...}}`），客户端已单独处理。
 - `finish_reason == "length"` 表示该页文本被截断，界面在 JSON 页签可查，不静默丢弃。
 
-## 命令行
+## docr-cli
+
+无界面批量识别，输出目录默认 `./docr-out`：
+
+```bash
+./build/docr-cli page.png -o out                       # 单图，输出 JSON
+./build/docr-cli doc.pdf --pages 5-10 -f all -o out    # 只识别 5–10 页，输出三种格式
+./build/docr-cli ./scans -p text_recognition -c 5 -o out
+```
+
+| 参数 | 说明 |
+|---|---|
+| `-o, --output DIR` | 输出目录（默认 `./docr-out`） |
+| `-p, --purpose MODE` | `rich_layout_recognition`（默认）/ `text_recognition` |
+| `-d, --dpi N` | 渲染精度，默认 150 |
+| `-c, --concurrency N` | 并发数 1–8，默认 3 |
+| `-f, --format FMT` | `json`（默认）/ `text` / `markdown` / `all` |
+| `--pages RANGE` | 1 起，如 `1-5,8`；默认全部 |
+| `--api-key KEY` | 默认读 `DEEPSEEK_API_KEY` / DSH 凭据库 |
+| `--base-url URL` | 默认官方地址 |
+| `-q, --quiet` | 只输出最终摘要 |
+
+输出文件为 `result.json` / `result.txt` / `result.md`。逐页进度写到标准输出，失败/空结果
+写到标准错误；退出码：`0` 成功，`2` 有页面失败，`1` 参数/加载/Key 错误。
+
+## GUI 命令行
 
 ```bash
 ./build/docr-qt --open doc.pdf --ocr                    # 打开并识别全部

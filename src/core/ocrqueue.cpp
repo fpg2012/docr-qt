@@ -47,22 +47,36 @@ int OcrQueue::startAll()
 
     QVector<int> pages;
     for (int i = 0; i < m_doc->count(); ++i) {
-        if (m_doc->page(i).hasResult())
-            continue;
-        if (m_pending.contains(i) || m_running.contains(i))
-            continue;
-        pages.append(i);
+        if (!m_doc->page(i).hasResult())
+            pages.append(i);
     }
-    if (pages.isEmpty())
+    return startPages(pages);
+}
+
+int OcrQueue::startPages(const QVector<int> &pages)
+{
+    if (!m_doc)
+        return 0;
+
+    QSet<int> seen;
+    int added = 0;
+    for (int page : pages) {
+        if (page < 0 || page >= m_doc->count() || seen.contains(page))
+            continue;
+        seen.insert(page);
+        if (m_pending.contains(page) || m_running.contains(page))
+            continue;
+        m_pending.enqueue(page);
+        ++added;
+    }
+    if (added == 0)
         return 0;
 
     m_emptyRetries.clear();
     m_allDoneEmitted = false;
-    for (int page : pages)
-        m_pending.enqueue(page);
     emit busyChanged(true);
     pump();
-    return pages.size();
+    return added;
 }
 
 bool OcrQueue::startPage(int page, bool *alreadyRunning)

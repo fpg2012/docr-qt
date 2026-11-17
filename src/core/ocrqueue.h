@@ -5,6 +5,7 @@
 #include <QQueue>
 #include <QSet>
 #include <QString>
+#include <QVector>
 
 #include "ocr.h"
 
@@ -24,6 +25,8 @@ public:
     bool isBusy() const;
     // 识别所有没有结果的页面；返回新入队的页数。
     int startAll();
+    // 识别指定页集合；返回新入队的页数。
+    int startPages(const QVector<int> &pages);
     // 识别指定页；若正在识别，alreadyRunning 置 true 并返回 false。
     bool startPage(int page, bool *alreadyRunning = nullptr);
     void stop();

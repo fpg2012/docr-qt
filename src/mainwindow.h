@@ -7,8 +7,8 @@
 #include <QSet>
 #include <QVector>
 
-#include "document.h"
-#include "ocrqueue.h"
+#include "core/document.h"
+#include "core/ocrqueue.h"
 
 class QAction;
 class QComboBox;

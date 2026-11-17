@@ -8,7 +8,7 @@
 #include <QSet>
 #include <QVector>
 
-#include "ocr.h"
+#include "core/ocr.h"
 
 class QGraphicsPixmapItem;
 class QGraphicsRectItem;
