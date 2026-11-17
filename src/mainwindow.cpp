@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeySequence>
@@ -29,6 +30,17 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QTabWidget>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
+#include <QPushButton>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QFormLayout>
+#include <QRegularExpression>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QCheckBox>
+#include <QHeaderView>
 #include <QTimer>
 #include <QToolBar>
 #include <QUrl>
@@ -46,6 +58,54 @@ namespace {
 
 const char *kImageFilter =
     "图片 (*.png *.jpg *.jpeg *.webp *.gif *.bmp *.tif *.tiff)";
+
+constexpr int kOutlinePageRole = Qt::UserRole + 1;
+
+void appendOutlineNode(QVector<OutlineEntry> &roots,
+                       QVector<QPair<int, QVector<int>>> &stack,
+                       const OutlineEntry &node, int level)
+{
+    while (!stack.isEmpty() && stack.last().first >= level)
+        stack.removeLast();
+    if (stack.isEmpty()) {
+        roots.append(node);
+        stack.append({level, QVector<int>{int(roots.size() - 1)}});
+        return;
+    }
+    QVector<int> path = stack.last().second;
+    QVector<OutlineEntry> *parent = &roots;
+    for (int index : path)
+        parent = &(*parent)[index].children;
+    parent->append(node);
+    path.append(parent->size() - 1);
+    stack.append({level, path});
+}
+
+QStringList tocLinesFromResult(const ocr::PageResult &result)
+{
+    QStringList lines;
+    if (!result.ok())
+        return lines;
+    if (result.purpose == QStringLiteral("rich_layout_recognition")
+        && !result.blocks.isEmpty()) {
+        for (const ocr::Block &block : result.blocks) {
+            if (block.kind.contains(QStringLiteral("page_number"))
+                || block.kind == QLatin1String("header")
+                || block.kind == QLatin1String("footer")
+                || block.kind.contains(QStringLiteral("page_footer"))) {
+                continue;
+            }
+            const QString text = ocr::displayText(block.text);
+            for (const QString &line : text.split(QLatin1Char('\n')))
+                lines.append(line);
+        }
+    } else {
+        const QString text = ocr::plainText(result.payload, result.purpose);
+        for (const QString &line : text.split(QLatin1Char('\n')))
+            lines.append(line);
+    }
+    return lines;
+}
 
 bool hasLocalFiles(const QMimeData *mime)
 {
@@ -94,6 +154,8 @@ MainWindow::MainWindow(QWidget *parent)
     connect(&m_queue, &OcrQueue::allFinished, this, [this] {
         if (m_stopAction)
             m_stopAction->setEnabled(false);
+        if (m_tocJob.active)
+            parseTocPages();
         updateStats();
         emit allFinished();
     });
@@ -110,10 +172,11 @@ void MainWindow::buildUi()
     m_view = new PageView(this);
     setCentralWidget(m_view);
 
-    // 左侧：页面缩略图
-    auto *leftDock = new QDockWidget(QStringLiteral("页面"), this);
+    // 左侧：页面缩略图 + 大纲
+    auto *leftDock = new QDockWidget(QStringLiteral("导航"), this);
     leftDock->setObjectName(QStringLiteral("pagesDock"));
-    m_pageList = new QListWidget(leftDock);
+    m_leftTabs = new QTabWidget(leftDock);
+    m_pageList = new QListWidget(m_leftTabs);
     m_pageList->setViewMode(QListView::IconMode);
     m_pageList->setIconSize(QSize(120, 160));
     m_pageList->setGridSize(QSize(150, 205));
@@ -122,8 +185,26 @@ void MainWindow::buildUi()
     m_pageList->setUniformItemSizes(true);
     m_pageList->setWordWrap(true);
     m_pageList->setSpacing(4);
-    leftDock->setWidget(m_pageList);
-    leftDock->setMinimumWidth(180);
+    m_leftTabs->addTab(m_pageList, QStringLiteral("页面"));
+
+    auto *outlineTab = new QWidget(m_leftTabs);
+    auto *outlineLayout = new QVBoxLayout(outlineTab);
+    outlineLayout->setContentsMargins(4, 4, 4, 4);
+    outlineLayout->setSpacing(4);
+    m_outlineTree = new QTreeWidget(outlineTab);
+    m_outlineTree->setHeaderHidden(true);
+    m_outlineTree->setIndentation(14);
+    m_outlineTree->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_outlineTree->setToolTip(QStringLiteral("点击大纲条目跳转到对应页"));
+    outlineLayout->addWidget(m_outlineTree, 1);
+    m_tocButton = new QPushButton(QStringLiteral("从目录页生成…"), outlineTab);
+    m_tocButton->setToolTip(
+        QStringLiteral("OCR 目录页，解析「标题 + 页码」，再映射到 PDF 实际页"));
+    outlineLayout->addWidget(m_tocButton);
+    m_leftTabs->addTab(outlineTab, QStringLiteral("大纲"));
+
+    leftDock->setWidget(m_leftTabs);
+    leftDock->setMinimumWidth(200);
     addDockWidget(Qt::LeftDockWidgetArea, leftDock);
 
     // 右侧：文本 / 版面块卡片 / 原始 JSON
@@ -166,6 +247,15 @@ void MainWindow::buildUi()
     statusBar()->addPermanentWidget(m_hintLabel);
     statusBar()->addPermanentWidget(m_progress);
 
+    connect(m_outlineTree, &QTreeWidget::itemClicked, this,
+            [this](QTreeWidgetItem *item, int) {
+                if (!item)
+                    return;
+                const int page = item->data(0, kOutlinePageRole).toInt();
+                if (page >= 0)
+                    goToPage(page);
+            });
+    connect(m_tocButton, &QPushButton::clicked, this, &MainWindow::generateOutlineFromToc);
     connect(m_pageList, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0 || m_syncingPage)
             return;
@@ -208,6 +298,7 @@ void MainWindow::buildUi()
     connect(m_blocks, &BlockCardList::blockActivated, this, [this](int index) {
         m_view->ensureBlockVisible(index);
     });
+    rebuildOutline();
 }
 
 void MainWindow::buildActions()
@@ -505,6 +596,10 @@ void MainWindow::openPaths(const QStringList &paths)
                              report.errors.isEmpty()
                                  ? QStringLiteral("没有可显示的页面")
                                  : report.errors.join(QLatin1Char('\n')));
+        m_ocrOutline.clear();
+        m_tocJob.active = false;
+        m_tocJob.pages.clear();
+        rebuildOutline();
         setWindowTitle(QStringLiteral("docr-qt"));
         updatePanels();
         updatePageNav();
@@ -513,6 +608,10 @@ void MainWindow::openPaths(const QStringList &paths)
     }
 
     addPagesToUi();
+    m_ocrOutline.clear();
+    m_tocJob.active = false;
+    m_tocJob.pages.clear();
+    rebuildOutline();
     const QString title =
         files.size() == 1
             ? QFileInfo(files.first()).fileName()
@@ -557,6 +656,337 @@ void MainWindow::addPagesToUi()
     if (m_doc.count() > 0)
         m_pageList->setCurrentRow(0);
     updateStats();
+}
+
+void MainWindow::appendOutlineItems(QTreeWidgetItem *parent,
+                                     const QVector<OutlineEntry> &entries)
+{
+    for (const OutlineEntry &entry : entries) {
+        auto *item = parent ? new QTreeWidgetItem(parent)
+                            : new QTreeWidgetItem(m_outlineTree);
+        item->setText(0, entry.title);
+        if (entry.page >= 0) {
+            item->setData(0, kOutlinePageRole, entry.page);
+            item->setToolTip(0, QStringLiteral("第 %1 页").arg(entry.page + 1));
+        }
+        if (!entry.children.isEmpty()) {
+            appendOutlineItems(item, entry.children);
+        } else if (entry.page < 0) {
+            item->setDisabled(true);
+        }
+    }
+}
+
+void MainWindow::rebuildOutline()
+{
+    if (!m_outlineTree || !m_leftTabs)
+        return;
+    m_outlineTree->clear();
+
+    const QVector<OutlineEntry> &builtin = m_doc.outline();
+    appendOutlineItems(nullptr, builtin);
+    if (!m_ocrOutline.isEmpty()) {
+        auto *root = new QTreeWidgetItem(m_outlineTree);
+        root->setText(0, QStringLiteral("OCR 目录"));
+        root->setFirstColumnSpanned(true);
+        appendOutlineItems(root, m_ocrOutline);
+        root->setExpanded(true);
+    }
+
+    if (m_outlineTree->topLevelItemCount() == 0) {
+        auto *empty = new QTreeWidgetItem(m_outlineTree);
+        empty->setText(0, QStringLiteral("没有内置大纲"));
+        empty->setDisabled(true);
+        empty->setToolTip(0, QStringLiteral("可以用下方按钮 OCR 目录页生成"));
+    } else {
+        m_outlineTree->expandToDepth(1);
+        for (int i = 0; i < m_outlineTree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = m_outlineTree->topLevelItem(i);
+            if (item->text(0) == QStringLiteral("OCR 目录"))
+                item->setExpanded(true);
+        }
+    }
+
+    m_tocButton->setEnabled(m_doc.count() > 0 && !m_tocJob.active);
+    m_tocButton->setText(m_tocJob.active ? QStringLiteral("正在识别目录页…")
+                                         : QStringLiteral("从目录页生成…"));
+    if (!builtin.isEmpty() || !m_ocrOutline.isEmpty())
+        m_leftTabs->setCurrentIndex(1);
+    else
+        m_leftTabs->setCurrentIndex(0);
+}
+
+void MainWindow::generateOutlineFromToc()
+{
+    if (m_doc.count() == 0) {
+        statusBar()->showMessage(QStringLiteral("先打开文档"), 3000);
+        return;
+    }
+    if (m_tocJob.active) {
+        statusBar()->showMessage(QStringLiteral("正在识别目录页…"), 3000);
+        return;
+    }
+    if (m_queue.isBusy()) {
+        QMessageBox::information(this, QStringLiteral("稍候"),
+                                 QStringLiteral("当前有识别任务在进行，完成后再生成目录。"));
+        return;
+    }
+
+    const int current = qMax(0, m_pageList->currentRow());
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("从目录页生成大纲"));
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *form = new QFormLayout;
+    auto *start = new QSpinBox(&dialog);
+    start->setRange(1, m_doc.count());
+    start->setValue(current + 1);
+    auto *end = new QSpinBox(&dialog);
+    end->setRange(1, m_doc.count());
+    end->setValue(qMin(m_doc.count(), current + 3));
+    form->addRow(QStringLiteral("目录起始页"), start);
+    form->addRow(QStringLiteral("目录结束页"), end);
+    layout->addLayout(form);
+    auto *hint = new QLabel(
+        QStringLiteral("会先识别这些页，再解析「标题 …… 页码」。\n"
+                       "已识别过的页直接复用，不会重复计费。"), &dialog);
+    hint->setWordWrap(true);
+    hint->setForegroundRole(QPalette::PlaceholderText);
+    layout->addWidget(hint);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+
+    int from = start->value() - 1;
+    int to = end->value() - 1;
+    if (from > to)
+        std::swap(from, to);
+    QVector<int> pages;
+    QVector<int> missing;
+    for (int page = from; page <= to; ++page) {
+        pages.append(page);
+        if (!m_doc.page(page).result.ok())
+            missing.append(page);
+    }
+    if (pages.isEmpty())
+        return;
+
+    m_tocJob.pages = pages;
+    if (missing.isEmpty()) {
+        m_tocJob.active = false;
+        parseTocPages();
+        return;
+    }
+
+    m_tocJob.active = true;
+    m_tocButton->setEnabled(false);
+    m_tocButton->setText(QStringLiteral("正在识别目录页…"));
+    statusBar()->showMessage(QStringLiteral("正在识别目录页…"), 3000);
+    if (m_queue.startPages(missing) == 0 && !m_queue.isBusy()) {
+        m_tocJob.active = false;
+        m_tocButton->setEnabled(true);
+        m_tocButton->setText(QStringLiteral("从目录页生成…"));
+        parseTocPages();
+    }
+}
+
+void MainWindow::parseTocPages()
+{
+    if (m_tocJob.pages.isEmpty())
+        return;
+    const QVector<int> pages = m_tocJob.pages;
+    m_tocJob.pages.clear();
+    m_tocJob.active = false;
+    m_tocButton->setEnabled(true);
+    m_tocButton->setText(QStringLiteral("从目录页生成…"));
+
+    QStringList lines;
+    int usable = 0;
+    for (int page : pages) {
+        if (page < 0 || page >= m_doc.count() || !m_doc.page(page).result.ok())
+            continue;
+        ++usable;
+        lines += tocLinesFromResult(m_doc.page(page).result);
+    }
+    if (usable == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("没有目录文字"),
+            QStringLiteral("这些页还没有可用的识别结果。请先识别目录页，或稍后重试。"));
+        return;
+    }
+    const QVector<toc::Entry> entries = toc::parseLines(lines);
+    if (entries.isEmpty()) {
+        QMessageBox::information(
+            this, QStringLiteral("没解析出目录"),
+            QStringLiteral("识别结果里没有找到「标题 …… 页码」格式的条目。\n"
+                           "可以检查目录页是否识别正确，或换几页试试。"));
+        return;
+    }
+
+    // 用目录页自己的页脚页码猜一个偏移；没有就回到 0，用户可在预览里调。
+    int guessedOffset = 0;
+    bool guessed = false;
+    for (int page : pages) {
+        if (page < 0 || page >= m_doc.count() || !m_doc.page(page).result.ok())
+            continue;
+        for (const ocr::Block &block : m_doc.page(page).result.blocks) {
+            if (!block.kind.contains(QStringLiteral("page_number"))
+                && !block.kind.contains(QStringLiteral("page_footer")))
+                continue;
+            static const QRegularExpression digits(QStringLiteral(R"(\d{1,4})"));
+            const QRegularExpressionMatch match =
+                digits.match(ocr::displayText(block.text));
+            if (!match.hasMatch())
+                continue;
+            const int printed = match.captured(0).toInt();
+            if (printed > 0) {
+                guessedOffset = page - printed + 1;
+                guessed = true;
+                break;
+            }
+        }
+        if (guessed)
+            break;
+        const QString label = m_doc.pageLabel(page);
+        // 没有显式页码标签时 poppler 会返回物理页号，不能拿它猜偏移。
+        if (label == QString::number(page + 1))
+            continue;
+        bool ok = false;
+        const int printed = label.toInt(&ok);
+        if (ok && printed > 0) {
+            guessedOffset = page - printed + 1;
+            break;
+        }
+    }
+
+    QVector<OutlineEntry> mapped;
+    if (previewToc(entries, guessedOffset, &mapped) && !mapped.isEmpty()) {
+        m_ocrOutline = mapped;
+        rebuildOutline();
+        m_leftTabs->setCurrentIndex(1);
+        statusBar()->showMessage(
+            QStringLiteral("已生成 OCR 大纲（%1 条目录项）").arg(entries.size()), 4000);
+    }
+}
+
+bool MainWindow::previewToc(const QVector<toc::Entry> &entries, int guessedOffset,
+                            QVector<OutlineEntry> *mapped)
+{
+    // poppler 在 PDF 没有页码标签时也会返回 "1"、"2"……，不能直接拿它当
+    // 印刷页码。只把「和物理页号不同」的标签当作真正的 PDF 页码标签。
+    QHash<QString, int> labels;
+    for (int i = 0; i < m_doc.count(); ++i) {
+        const QString label = m_doc.pageLabel(i);
+        if (label.isEmpty() || label == QString::number(i + 1))
+            continue;
+        if (!labels.contains(label))
+            labels.insert(label, i);
+    }
+    const bool explicitLabels = !labels.isEmpty();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("预览 OCR 大纲"));
+    dialog.resize(760, 560);
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *summary = new QLabel(
+        QStringLiteral("解析到 %1 条目录项。勾选需要的条目；取消勾选可丢弃误识别项。")
+            .arg(entries.size()),
+        &dialog);
+    summary->setWordWrap(true);
+    layout->addWidget(summary);
+
+    auto *tree = new QTreeWidget(&dialog);
+    tree->setColumnCount(3);
+    tree->setHeaderLabels({QStringLiteral("标题"), QStringLiteral("目录页"),
+                           QStringLiteral("PDF 页")});
+    tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
+    tree->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    tree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    tree->setRootIsDecorated(false);
+    tree->setUniformRowHeights(true);
+    layout->addWidget(tree, 1);
+
+    for (const toc::Entry &entry : entries) {
+        auto *item = new QTreeWidgetItem(tree);
+        item->setText(0, QString(2 * (entry.level - 1), QLatin1Char(' ')) + entry.title);
+        item->setText(1, QString::number(entry.printedPage));
+        item->setData(0, Qt::UserRole, entry.level);
+        item->setData(0, Qt::UserRole + 1, entry.printedPage);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(0, Qt::Checked);
+    }
+
+    auto *options = new QFormLayout;
+    auto *useLabels = new QCheckBox(QStringLiteral("优先按 PDF 页码标签匹配"), &dialog);
+    useLabels->setChecked(explicitLabels);
+    useLabels->setEnabled(explicitLabels && !labels.isEmpty());
+    options->addRow(useLabels);
+    auto *offset = new QSpinBox(&dialog);
+    offset->setRange(-9999, 9999);
+    offset->setValue(guessedOffset);
+    offset->setSuffix(QStringLiteral(" 页"));
+    options->addRow(QStringLiteral("PDF 页码 = 目录页码 +"), offset);
+    layout->addLayout(options);
+
+    auto updateMapping = [&] {
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = tree->topLevelItem(i);
+            const int printed = item->data(0, Qt::UserRole + 1).toInt();
+            int page = -1;
+            if (useLabels->isChecked())
+                page = labels.value(QString::number(printed), -1);
+            if (page < 0)
+                page = printed - 1 + offset->value();
+            item->setData(0, Qt::UserRole + 2, page);
+            if (page >= 0 && page < m_doc.count())
+                item->setText(2, QString::number(page + 1));
+            else
+                item->setText(2, QStringLiteral("—"));
+        }
+    };
+    connect(offset, &QSpinBox::valueChanged, &dialog, updateMapping);
+    connect(useLabels, &QCheckBox::toggled, &dialog, updateMapping);
+    updateMapping();
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel,
+                                         &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    while (dialog.exec() == QDialog::Accepted) {
+        QVector<OutlineEntry> roots;
+        QVector<QPair<int, QVector<int>>> stack;
+        int skipped = 0;
+        for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+            QTreeWidgetItem *item = tree->topLevelItem(i);
+            if (item->checkState(0) != Qt::Checked)
+                continue;
+            const int page = item->data(0, Qt::UserRole + 2).toInt();
+            if (page < 0 || page >= m_doc.count()) {
+                ++skipped;
+                continue;
+            }
+            OutlineEntry node;
+            node.title = item->text(0).trimmed();
+            node.page = page;
+            appendOutlineNode(roots, stack, node, item->data(0, Qt::UserRole).toInt());
+        }
+        if (roots.isEmpty()) {
+            QMessageBox::warning(&dialog, QStringLiteral("没有可用的条目"),
+                                 QStringLiteral("请至少勾选一条，并让 PDF 页码落在文档范围内。"));
+            continue;
+        }
+        if (skipped > 0)
+            statusBar()->showMessage(
+                QStringLiteral("有 %1 条目录项页码超出范围，已跳过").arg(skipped), 5000);
+        *mapped = roots;
+        return true;
+    }
+    return false;
 }
 
 void MainWindow::ensureThumbs()
@@ -880,6 +1310,14 @@ void MainWindow::onPageFinished(int page, const ocr::PageResult &result)
 void MainWindow::stopOcr()
 {
     m_queue.stop();
+    if (m_tocJob.active) {
+        m_tocJob.active = false;
+        m_tocJob.pages.clear();
+        if (m_tocButton) {
+            m_tocButton->setEnabled(m_doc.count() > 0);
+            m_tocButton->setText(QStringLiteral("从目录页生成…"));
+        }
+    }
     m_retriedPages.clear();
     m_batchMode = false;
     if (m_stopAction)

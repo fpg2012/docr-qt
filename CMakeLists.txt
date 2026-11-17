@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(docr-qt VERSION 0.3.0 LANGUAGES CXX)
+project(docr-qt VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,7 @@ add_library(docr-core STATIC
     src/core/ocrqueue.cpp
     src/core/exporters.cpp
     src/core/ocrdiagnostics.cpp
+    src/core/tocparser.cpp
 )
 target_include_directories(docr-core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_compile_definitions(docr-core PUBLIC DOCR_VERSION="${PROJECT_VERSION}")

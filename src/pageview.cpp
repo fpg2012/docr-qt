@@ -360,6 +360,8 @@ void PageView::ensurePageItems(int page)
             m_scene->addItem(item);
             m_items.append({item, flat, page});
         }
+        // 新页面的框一出现就应该带类型颜色，而不是等鼠标悬停才上色。
+        repaintBlock(flat);
     }
 }
 

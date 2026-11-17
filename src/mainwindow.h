@@ -9,6 +9,7 @@
 
 #include "core/document.h"
 #include "core/ocrqueue.h"
+#include "core/tocparser.h"
 
 class QAction;
 class QComboBox;
@@ -18,6 +19,9 @@ class QPlainTextEdit;
 class QProgressBar;
 class QSpinBox;
 class QTabWidget;
+class QTreeWidget;
+class QTreeWidgetItem;
+class QPushButton;
 class QTimer;
 class BlockCardList;
 class PageView;
@@ -77,6 +81,12 @@ private:
     void onPageRetrying(int page);
     void onPageFinished(int page, const ocr::PageResult &result);
     void ensureThumbs();
+    void rebuildOutline();
+    void appendOutlineItems(QTreeWidgetItem *parent, const QVector<OutlineEntry> &entries);
+    void generateOutlineFromToc();
+    void parseTocPages();
+    bool previewToc(const QVector<toc::Entry> &entries, int guessedOffset,
+                    QVector<OutlineEntry> *mapped);
 
     void exportMarkdown();
     void exportJson();
@@ -92,7 +102,10 @@ private:
     Document m_doc;
     OcrQueue m_queue;
 
+    QTabWidget *m_leftTabs = nullptr;
     QListWidget *m_pageList = nullptr;
+    QTreeWidget *m_outlineTree = nullptr;
+    QPushButton *m_tocButton = nullptr;
     PageView *m_view = nullptr;
     QPlainTextEdit *m_textView = nullptr;
     QPlainTextEdit *m_jsonView = nullptr;
@@ -111,6 +124,12 @@ private:
     QList<QPair<QAction *, QString>> m_themedActions;
     bool m_applyingTheme = false;
     void applyTheme();
+
+    QVector<OutlineEntry> m_ocrOutline;
+    struct TocJob {
+        bool active = false;
+        QVector<int> pages;
+    } m_tocJob;
 
     QSet<int> m_retriedPages;
     int m_concurrency = 3;

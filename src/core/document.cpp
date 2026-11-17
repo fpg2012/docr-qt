@@ -5,6 +5,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QImageReader>
+#include <functional>
 
 QStringList Document::imageNameFilters()
 {
@@ -33,19 +34,47 @@ bool Document::addPdf(const QString &path, int dpi, QString *error)
 
     const QString base = QFileInfo(path).fileName();
     m_pages.reserve(m_pages.size() + pages);
+    const int basePage = m_pages.size();
     for (int i = 0; i < pages; ++i) {
         PageEntry entry;
         entry.label = QStringLiteral("%1 · %2").arg(base).arg(i + 1);
         entry.sourcePath = path;
         entry.pdf = pdf;
         entry.pdfPage = i;
-        if (std::unique_ptr<Poppler::Page> page = std::unique_ptr<Poppler::Page>(pdf->page(i)))
+        if (std::unique_ptr<Poppler::Page> page = std::unique_ptr<Poppler::Page>(pdf->page(i))) {
             entry.pdfSize = page->pageSizeF();
+            const QString label = page->label().trimmed();
+            // poppler 对没有标签的页面也会回退成物理页号；只保留真正有区分度的标签。
+            if (!label.isEmpty() && label != QString::number(i + 1))
+                entry.pageLabelText = label;
+        }
         m_pages.append(entry);
     }
     m_dpi = dpi;
     if (m_path.isEmpty())
         m_path = QFileInfo(path).absoluteFilePath();
+
+    std::function<QVector<OutlineEntry>(const QVector<Poppler::OutlineItem> &)> convert =
+        [&](const QVector<Poppler::OutlineItem> &items) {
+            QVector<OutlineEntry> result;
+            for (const Poppler::OutlineItem &item : items) {
+                OutlineEntry entry;
+                entry.title = item.name().trimmed();
+                if (entry.title.isEmpty())
+                    entry.title = QStringLiteral("（未命名）");
+                const auto destination = item.destination();
+                if (destination && item.externalFileName().isEmpty()
+                    && item.uri().isEmpty()) {
+                    const int target = destination->pageNumber() - 1;
+                    if (target >= 0 && target < pages)
+                        entry.page = basePage + target;
+                }
+                entry.children = convert(item.children());
+                result.append(entry);
+            }
+            return result;
+        };
+    m_outline += convert(pdf->outline());
     return true;
 }
 
@@ -136,6 +165,7 @@ int Document::addImageDir(const QString &dir)
 void Document::clear()
 {
     m_pages.clear();
+    m_outline.clear();
     m_path.clear();
 }
 
@@ -228,4 +258,11 @@ void Document::releaseImage(int index)
     if (index < 0 || index >= m_pages.size())
         return;
     m_pages[index].image = QImage();
+}
+
+QString Document::pageLabel(int index) const
+{
+    if (index < 0 || index >= m_pages.size())
+        return {};
+    return m_pages.at(index).pageLabelText;
 }

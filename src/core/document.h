@@ -18,12 +18,20 @@ struct DocumentLoadReport {
     QStringList errors;
 };
 
+// PDF 内置大纲（书签）的一节；page 是拼接文档里的全局页下标，-1 表示没有目标页。
+struct OutlineEntry {
+    QString title;
+    int page = -1;
+    QVector<OutlineEntry> children;
+};
+
 struct PageEntry {
     QString label;      // 侧栏显示名
     QString sourcePath; // 源 PDF/图片路径
     int pdfPage = -1;   // PDF 内页码（0 起）；图片为 -1
     std::shared_ptr<Poppler::Document> pdf; // 非空则从该 PDF 渲染本页
     QSizeF pdfSize;     // PDF 页面尺寸（point，72 dpi）
+    QString pageLabelText; // PDF 显式页码标签（没有则空）
     QSize imageSize;    // 图片页面原始尺寸
     QImage image;       // 渲染结果（按需）
     QImage thumb;       // 缩略图（UI 再转 QPixmap）
@@ -49,6 +57,8 @@ public:
     int dpi() const { return m_dpi; }
     void setDpi(int dpi) { m_dpi = dpi; }
     QString sourcePath() const { return m_path; }
+    // PDF 自带的 outline；多个 PDF 混排时页号已映射到全局页。
+    const QVector<OutlineEntry> &outline() const { return m_outline; }
 
     PageEntry &page(int index) { return m_pages[index]; }
     const PageEntry &page(int index) const { return m_pages[index]; }
@@ -60,12 +70,15 @@ public:
     QSizeF pageSize(int index) const;
     // 连续视图滚出可视区后释放整页缓存；缩略图保留。
     void releaseImage(int index);
+    // PDF 自带的、和物理页号不同的页码标签（如 "iv"）；没有则返回空。
+    QString pageLabel(int index) const;
 
     // 图片序列可用的后缀（供目录展开与文件对话框复用）。
     static QStringList imageNameFilters();
 
 private:
     QVector<PageEntry> m_pages;
+    QVector<OutlineEntry> m_outline;
     QImage renderPdfPage(const std::shared_ptr<Poppler::Document> &pdf, int page);
     int m_dpi = 150;
     QString m_path;
