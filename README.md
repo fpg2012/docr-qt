@@ -15,20 +15,45 @@
 - poppler-qt6 开发包
 - CMake ≥ 3.21，支持 C++20 的编译器
 
+Arch Linux：
+
+```bash
+sudo pacman -S --needed base-devel cmake pkgconf qt6-base qt6-svg poppler-qt6
+```
+
 Debian / Ubuntu：
 
 ```bash
 sudo apt install qt6-base-dev libqt6svg6-dev libpoppler-qt6-dev cmake g++
 ```
 
+Windows：使用 [MSYS2](https://www.msys2.org/) 的 UCRT64 环境。项目通过 pkg-config 查找
+poppler-qt6，因此需要在 UCRT64 shell 中安装依赖并构建：
+
+```bash
+pacman -S --needed mingw-w64-ucrt-x86_64-toolchain mingw-w64-ucrt-x86_64-cmake \
+  mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-pkgconf \
+  mingw-w64-ucrt-x86_64-qt6-base mingw-w64-ucrt-x86_64-qt6-svg \
+  mingw-w64-ucrt-x86_64-poppler-qt6
+```
+
 **构建**
+
+Linux：
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-生成两个可执行文件：`build/docr-qt` 和 `build/docr-cli`。
+Windows（UCRT64 shell）：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+生成 `build/docr-qt`、`build/docr-cli`；Windows 下为对应的 `.exe` 文件。
 
 **配置 API Key**
 
@@ -42,9 +67,18 @@ export DEEPSEEK_API_KEY=sk-...
 
 **运行**
 
+Linux：
+
 ```bash
 ./build/docr-qt
 ./build/docr-cli --help
+```
+
+Windows（在同一个 UCRT64 shell 中）：
+
+```bash
+./build/docr-qt.exe
+./build/docr-cli.exe --help
 ```
 
 把 PDF、图片或图片目录拖进窗口即可开始识别。命令行批量识别示例：
@@ -53,13 +87,20 @@ export DEEPSEEK_API_KEY=sk-...
 ./build/docr-cli doc.pdf --pages 1-5 -f markdown -o out
 ```
 
+Windows 下把命令中的 `docr-cli` 换成 `docr-cli.exe`。在 UCRT64 shell 中运行时会自动找到
+Qt 和 poppler 的 DLL；若要脱离 MSYS2 分发，需要将相关 DLL 与 exe 放在一起，可先用
+`windeployqt` 复制 Qt 依赖。
+
 **安装**
+
+Linux：
 
 ```bash
 sudo cmake --install build
 ```
 
-默认安装到 `/usr/local/bin`，同时安装应用图标和 desktop 文件。
+默认安装到 `/usr/local/bin`，同时安装应用图标和 desktop 文件。Windows 直接在 UCRT64
+环境中运行即可，无需执行安装步骤。
 
 ## 代码结构
 
