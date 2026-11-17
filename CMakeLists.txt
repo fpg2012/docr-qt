@@ -4,6 +4,7 @@ project(docr-qt LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Gui)
 find_package(PkgConfig REQUIRED)
@@ -15,6 +16,7 @@ add_executable(docr-qt
     src/document.cpp
     src/pageview.cpp
     src/mainwindow.cpp
+    resources.qrc
 )
 
 target_link_libraries(docr-qt PRIVATE
@@ -25,3 +27,5 @@ target_link_libraries(docr-qt PRIVATE
 )
 
 install(TARGETS docr-qt RUNTIME DESTINATION bin)
+install(FILES assets/app.svg DESTINATION share/icons/hicolor/scalable/apps RENAME docr-qt.svg)
+install(FILES assets/docr-qt.desktop DESTINATION share/applications)

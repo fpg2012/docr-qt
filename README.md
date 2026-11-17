@@ -34,6 +34,23 @@ cmake --build build -j
 ./build/docr-qt
 ```
 
+## 界面
+
+工具栏为纯图标（悬停显示名称与快捷键），每个动作在菜单里也有文字入口：
+
+| 图标 | 动作 | 快捷键 |
+|---|---|---|
+| 文档 / 图片 / 文件夹 | 打开 PDF / 图片 / 目录 | `Ctrl+O` / `Ctrl+Shift+O` / — |
+| 扫描框 / 叠页 | 识别本页 / 识别全部 | `Ctrl+R` / `Ctrl+Shift+R` |
+| 实心方块 | 停止 | `Esc` |
+| 虚线框 | 显示/隐藏识别框 | — |
+| 双向箭头 / ± 放大镜 / 角标 | 适应宽度 / 放大 / 缩小 / 原始大小 | `F` / `Ctrl++` / `Ctrl+-` / — |
+| 滑杆 | 设置 | `Ctrl+,` |
+
+图标为手写的 24×24 线性 SVG（`assets/icons/`），应用图标是深色圆角方块 + 扫描角标
+（`assets/app.svg`）。`cmake --install` 会把图标装到 `share/icons/hicolor/scalable/apps/docr-qt.svg`，
+并安装 `assets/docr-qt.desktop`。
+
 ## 使用
 
 - **打开**：拖入 PDF / 图片 / 图片目录，或工具栏「打开 PDF / 打开图片 / 打开文件夹」。

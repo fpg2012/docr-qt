@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=docr-qt
+Comment=DeepSeek OCR 桌面客户端
+Exec=docr-qt %f
+Icon=docr-qt
+Terminal=false
+Categories=Graphics;Utility;
+MimeType=application/pdf;image/png;image/jpeg;image/webp;
+StartupWMClass=docr-qt

@@ -74,6 +74,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     setAcceptDrops(true);
     resize(1480, 940);
+    setWindowIcon(QIcon(QStringLiteral(":/icons/app.svg")));
     setWindowTitle(QStringLiteral("docr-qt"));
 }
 
@@ -156,83 +157,130 @@ void MainWindow::buildUi()
 void MainWindow::buildActions()
 {
     auto *toolbar = addToolBar(QStringLiteral("主工具栏"));
+    toolbar->setObjectName(QStringLiteral("mainToolbar"));
     toolbar->setMovable(false);
+    toolbar->setFloatable(false);
+    toolbar->setIconSize(QSize(22, 22));
+    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
 
-    auto add = [this, toolbar](const QString &text, const QKeySequence &shortcut,
-                               auto &&slot) {
-        auto *action = new QAction(text, this);
+    auto make = [this](const QString &icon, const QString &text,
+                       const QKeySequence &shortcut, auto &&slot) {
+        auto *action = new QAction(QIcon(QStringLiteral(":/icons/%1.svg").arg(icon)), text, this);
         if (!shortcut.isEmpty())
             action->setShortcut(shortcut);
+        const QString tip = shortcut.isEmpty()
+                                ? text
+                                : QStringLiteral("%1  %2").arg(
+                                      text, shortcut.toString(QKeySequence::NativeText));
+        action->setToolTip(tip);
+        action->setStatusTip(text);
+        action->setIconVisibleInMenu(false);
         connect(action, &QAction::triggered, this, slot);
-        toolbar->addAction(action);
         return action;
     };
 
-    add(QStringLiteral("打开 PDF"), QKeySequence::Open, [this] { openFiles(); });
-    add(QStringLiteral("打开图片"), QKeySequence(QStringLiteral("Ctrl+Shift+O")),
-        [this] { openFiles(); });
-    add(QStringLiteral("打开文件夹"), QKeySequence(), [this] { openDirectory(); });
+    QAction *openPdf = make(QStringLiteral("open-pdf"), QStringLiteral("打开 PDF"),
+                            QKeySequence::Open, [this] { openFiles(); });
+    QAction *openImage = make(QStringLiteral("open-image"), QStringLiteral("打开图片"),
+                              QKeySequence(QStringLiteral("Ctrl+Shift+O")),
+                              [this] { openFiles(); });
+    QAction *openFolder = make(QStringLiteral("open-folder"), QStringLiteral("打开文件夹"),
+                               QKeySequence(), [this] { openDirectory(); });
 
-    toolbar->addSeparator();
-
-    add(QStringLiteral("识别本页"), QKeySequence(QStringLiteral("Ctrl+R")),
-        [this] { startOcrCurrent(); });
-    add(QStringLiteral("识别全部"), QKeySequence(QStringLiteral("Ctrl+Shift+R")),
-        [this] { startOcrAll(); });
-    auto *stop = add(QStringLiteral("停止"), QKeySequence(Qt::Key_Escape),
-                     [this] { stopOcr(); });
+    QAction *ocrPage = make(QStringLiteral("ocr-page"), QStringLiteral("识别本页"),
+                            QKeySequence(QStringLiteral("Ctrl+R")),
+                            [this] { startOcrCurrent(); });
+    QAction *ocrAll = make(QStringLiteral("ocr-all"), QStringLiteral("识别全部"),
+                           QKeySequence(QStringLiteral("Ctrl+Shift+R")),
+                           [this] { startOcrAll(); });
+    QAction *stop = make(QStringLiteral("stop"), QStringLiteral("停止"),
+                         QKeySequence(Qt::Key_Escape), [this] { stopOcr(); });
     stop->setEnabled(false);
     m_stopAction = stop;
 
-    toolbar->addSeparator();
+    QAction *showBoxes = make(QStringLiteral("boxes"), QStringLiteral("显示识别框"),
+                              QKeySequence(), [this] {});
+    showBoxes->disconnect(this);
+    showBoxes->setCheckable(true);
+    showBoxes->setChecked(true);
+    showBoxes->setToolTip(QStringLiteral("显示/隐藏版面框"));
+    connect(showBoxes, &QAction::toggled, this, [this](bool on) {
+        m_view->setBoxesVisible(on);
+    });
 
-    m_purposeBox = new QComboBox(this);
+    QAction *fit = make(QStringLiteral("fit-width"), QStringLiteral("适应宽度"),
+                        QKeySequence(Qt::Key_F), [this] { m_view->fitWidth(); });
+    QAction *zoomIn = make(QStringLiteral("zoom-in"), QStringLiteral("放大"),
+                           QKeySequence::ZoomIn, [this] { m_view->zoomBy(1.2); });
+    QAction *zoomOut = make(QStringLiteral("zoom-out"), QStringLiteral("缩小"),
+                            QKeySequence::ZoomOut, [this] { m_view->zoomBy(1 / 1.2); });
+    QAction *actual = make(QStringLiteral("actual-size"), QStringLiteral("原始大小"),
+                           QKeySequence(), [this] { m_view->resetZoom(); });
+    QAction *settings = make(QStringLiteral("settings"), QStringLiteral("设置"),
+                             QKeySequence(QStringLiteral("Ctrl+,")),
+                             [this] { openSettings(); });
+
+    toolbar->addAction(openPdf);
+    toolbar->addAction(openImage);
+    toolbar->addAction(openFolder);
+    toolbar->addSeparator();
+    toolbar->addAction(ocrPage);
+    toolbar->addAction(ocrAll);
+    toolbar->addAction(stop);
+    toolbar->addSeparator();
+    toolbar->addAction(showBoxes);
+
+    auto *purposeSpacer = new QWidget(toolbar);
+    purposeSpacer->setFixedWidth(6);
+    toolbar->addWidget(purposeSpacer);
+
+    m_purposeBox = new QComboBox(toolbar);
     m_purposeBox->addItem(QStringLiteral("版面分析（带坐标框）"),
                           QStringLiteral("rich_layout_recognition"));
     m_purposeBox->addItem(QStringLiteral("纯文本（更快）"),
                           QStringLiteral("text_recognition"));
-    m_purposeBox->setToolTip(QStringLiteral("rich_layout_recognition 会返回 <|ref|>/<|box|> 标记与坐标"));
+    m_purposeBox->setToolTip(QStringLiteral(
+        "rich_layout_recognition 返回 <|ref|>/<|box|> 标记与坐标；text_recognition 只返回文字"));
     toolbar->addWidget(m_purposeBox);
     connect(m_purposeBox, &QComboBox::currentIndexChanged, this, [this](int index) {
         m_purpose = m_purposeBox->itemData(index).toString();
         saveSettings();
     });
 
-    auto *showBoxes = new QAction(QStringLiteral("显示识别框"), this);
-    showBoxes->setCheckable(true);
-    showBoxes->setChecked(true);
-    toolbar->addAction(showBoxes);
-    connect(showBoxes, &QAction::toggled, this, [this](bool on) { m_view->setBoxesVisible(on); });
-
     toolbar->addSeparator();
-    add(QStringLiteral("适应宽度"), QKeySequence(Qt::Key_F), [this] { m_view->fitWidth(); });
-    add(QStringLiteral("放大"), QKeySequence::ZoomIn, [this] { m_view->zoomBy(1.2); });
-    add(QStringLiteral("缩小"), QKeySequence::ZoomOut, [this] { m_view->zoomBy(1 / 1.2); });
-    add(QStringLiteral("原始大小"), QKeySequence(), [this] { m_view->resetZoom(); });
-
+    toolbar->addAction(fit);
+    toolbar->addAction(zoomIn);
+    toolbar->addAction(zoomOut);
+    toolbar->addAction(actual);
     toolbar->addSeparator();
-    add(QStringLiteral("设置"), QKeySequence(QStringLiteral("Ctrl+,"), QKeySequence::NativeText),
-        [this] { openSettings(); });
+    toolbar->addAction(settings);
 
-    auto *menu = menuBar()->addMenu(QStringLiteral("文件"));
-    menu->addAction(QStringLiteral("打开…"), QKeySequence::Open, this, [this] { openFiles(); });
-    menu->addAction(QStringLiteral("打开文件夹…"), this, [this] { openDirectory(); });
-    menu->addSeparator();
-    menu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
-    menu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
-    menu->addAction(QStringLiteral("复制本页文本"), QKeySequence::Copy, this, [this] { copyText(); });
-    menu->addSeparator();
-    menu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
+    auto *fileMenu = menuBar()->addMenu(QStringLiteral("文件"));
+    fileMenu->addAction(openPdf);
+    fileMenu->addAction(openImage);
+    fileMenu->addAction(openFolder);
+    fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
+    fileMenu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
+    fileMenu->addAction(QStringLiteral("复制本页文本"), QKeySequence::Copy, this,
+                        [this] { copyText(); });
+    fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("退出"), QKeySequence::Quit, this, [this] { close(); });
 
     auto *ocrMenu = menuBar()->addMenu(QStringLiteral("识别"));
-    ocrMenu->addAction(QStringLiteral("本页"), QKeySequence(QStringLiteral("Ctrl+R")), this,
-                       [this] { startOcrCurrent(); });
-    ocrMenu->addAction(QStringLiteral("全部缺失页"), QKeySequence(QStringLiteral("Ctrl+Shift+R")),
-                       this, [this] { startOcrAll(); });
-    ocrMenu->addAction(QStringLiteral("停止"), QKeySequence(Qt::Key_Escape), this,
-                       [this] { stopOcr(); });
+    ocrMenu->addAction(ocrPage);
+    ocrMenu->addAction(ocrAll);
+    ocrMenu->addAction(stop);
     ocrMenu->addSeparator();
-    ocrMenu->addAction(QStringLiteral("设置…"), this, [this] { openSettings(); });
+    ocrMenu->addAction(settings);
+
+    auto *viewMenu = menuBar()->addMenu(QStringLiteral("视图"));
+    viewMenu->addAction(fit);
+    viewMenu->addAction(zoomIn);
+    viewMenu->addAction(zoomOut);
+    viewMenu->addAction(actual);
+    viewMenu->addSeparator();
+    viewMenu->addAction(showBoxes);
 }
 
 void MainWindow::applySettings()
