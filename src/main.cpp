@@ -37,6 +37,9 @@ int main(int argc, char *argv[])
     QCommandLineOption outlineOption(QStringLiteral("outline"),
                                      QStringLiteral("启动时导入 JSON/YAML 大纲"),
                                      QStringLiteral("path"));
+    QCommandLineOption importResultsOption(QStringLiteral("import-results"),
+                                           QStringLiteral("启动时导入识别结果 JSON"),
+                                           QStringLiteral("path"));
     QCommandLineOption selectOption(QStringLiteral("select"),
                                     QStringLiteral("调试：选中第 1 页的指定版面块（逗号分隔，隐含切到「版面块」页）"),
                                     QStringLiteral("indices"));
@@ -52,7 +55,7 @@ int main(int argc, char *argv[])
     QCommandLineOption lightOption(QStringLiteral("light"), QStringLiteral("强制浅色方案（调试用）"));
     parser.addOptions({openOption, ocrOption, ocrCurrentOption, screenshotOption, mockOption, purposeOption,
                        selectOption, textSelectOption, dropHintOption, outlineOption,
-                       pageOption, darkOption, lightOption});
+                       importResultsOption, pageOption, darkOption, lightOption});
     parser.process(app);
 
     if (parser.isSet(darkOption))
@@ -73,6 +76,8 @@ int main(int argc, char *argv[])
         window.injectMockResult(parser.value(mockOption));
     if (parser.isSet(outlineOption))
         window.importOutlineFile(parser.value(outlineOption));
+    if (parser.isSet(importResultsOption))
+        window.importResultsFile(parser.value(importResultsOption));
 
     if (parser.isSet(pageOption)) {
         bool ok = false;

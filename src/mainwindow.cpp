@@ -496,6 +496,8 @@ void MainWindow::buildActions()
     fileMenu->addAction(openImage);
     fileMenu->addAction(openFolder);
     fileMenu->addSeparator();
+    fileMenu->addAction(QStringLiteral("导入识别结果 JSON…"), this,
+                        [this] { importResults(); });
     fileMenu->addAction(QStringLiteral("导出 Markdown…"), this, [this] { exportMarkdown(); });
     fileMenu->addAction(QStringLiteral("导出 JSON…"), this, [this] { exportJson(); });
     fileMenu->addAction(QStringLiteral("导出可搜索 PDF…"), this,
@@ -1653,6 +1655,70 @@ void MainWindow::stopOcr()
     updateStats();
 }
 
+void MainWindow::importResults()
+{
+    if (m_doc.count() == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("导入识别结果"),
+            QStringLiteral("请先打开识别时的源 PDF / 图片，再导入 JSON。"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("导入识别结果 JSON"), QDir::homePath(),
+        QStringLiteral("JSON (*.json);;所有文件 (*)"));
+    if (path.isEmpty())
+        return;
+    importResultsFile(path);
+}
+
+bool MainWindow::importResultsFile(const QString &path)
+{
+    if (m_doc.count() == 0) {
+        QMessageBox::information(
+            this, QStringLiteral("导入识别结果"),
+            QStringLiteral("请先打开识别时的源 PDF / 图片，再导入 JSON。"));
+        return false;
+    }
+    if (m_queue.isBusy()) {
+        QMessageBox::information(this, QStringLiteral("导入识别结果"),
+                                 QStringLiteral("识别任务正在进行，请先停止再导入。"));
+        return false;
+    }
+
+    QVector<ocr::PageResult> results;
+    QString error;
+    if (!exporters::readJson(path, m_doc.count(), &results, &error)) {
+        QMessageBox::warning(this, QStringLiteral("导入失败"), error);
+        return false;
+    }
+
+    int applied = 0;
+    for (const ocr::PageResult &result : results) {
+        if (result.page < 0 || result.page >= m_doc.count())
+            continue;
+        m_doc.page(result.page).result = result;
+        m_retriedPages.remove(result.page);
+        refreshPageList(result.page);
+        ++applied;
+    }
+    if (applied == 0) {
+        QMessageBox::warning(this, QStringLiteral("导入失败"),
+                             QStringLiteral("没有页码能匹配当前文档。"));
+        return false;
+    }
+
+    m_batchMode = false;
+    m_view->reloadResults();
+    const int current = m_pageList->currentRow();
+    if (current >= 0)
+        showPage(current);
+    updateStats();
+    statusBar()->showMessage(
+        QStringLiteral("已导入 %1 页识别结果：%2").arg(applied).arg(QFileInfo(path).fileName()),
+        6000);
+    return true;
+}
+
 void MainWindow::exportMarkdown()
 {
     if (m_doc.count() == 0)
@@ -1944,11 +2010,7 @@ void MainWindow::injectMockResult(const QString &jsonPath)
     result.page = 0;
     result.purpose = m_purpose;
     result.payload = doc.object();
-    if (m_purpose == QStringLiteral("rich_layout_recognition")) {
-        for (const QJsonValue &value : result.payload.value(QStringLiteral("pages")).toArray())
-            result.blocks += ocr::parseBlocks(
-                value.toObject().value(QStringLiteral("text")).toString());
-    }
+    result.blocks = ocr::blocksFromPayload(result.payload, &result.purpose);
     if (m_doc.count() > 0)
         m_doc.page(0).result = result;
     refreshPageList(0);

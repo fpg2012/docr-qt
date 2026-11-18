@@ -8,8 +8,9 @@
 目录页既可以按「标题 …… 页码」规则解析，也可以导入 pdf-outline 兼容的 JSON/YAML 多级
 大纲。图片块可以直接复制，右键还能导出为 PNG。
 
-识别结果可以导出 Markdown / JSON，也可以生成保留原页面、带不可见 OCR 文本层和当前大纲的
-可搜索 PDF。批量识别前可以用「识别 → 估算全部 OCR 费用…」按 OCR API 的页费
+识别结果可以导出 Markdown / JSON，也可以把之前导出的 JSON 重新导入当前文档；可搜索 PDF
+会按页面图像里检测到的真实文字行放置不可见文本层，复制/搜索时和原文字基本对齐。批量识别前
+可以用「识别 → 估算全部 OCR 费用…」按 OCR API 的页费
 （1.5 元/千页）估算总费用。也可以切换到本地 GLM-OCR（vLLM）后端，不产生 DeepSeek
 OCR 页费。同一套核心还提供 `docr-cli`，可以在无界面环境中批量识别并导出 JSON / 文本 /
 Markdown。
@@ -85,8 +86,9 @@ Linux：
 ```bash
 ./build/docr-qt
 ./build/docr-cli --help
-# 也可以在启动时导入大纲
+# 也可以在启动时导入大纲，或恢复之前导出的识别结果
 ./build/docr-qt --open doc.pdf --outline outline.yaml
+./build/docr-qt --open doc.pdf --import-results ocr.json
 ```
 
 Windows（在同一个 UCRT64 shell 中）：
@@ -105,8 +107,15 @@ Windows（在同一个 UCRT64 shell 中）：
 ```
 
 识别完成后，用「文件 → 导出可搜索 PDF…」可以生成保留原页面、带不可见文本层和当前大纲的
-PDF。单个 PDF 会通过 `pindf-append` 走真正的增量更新：原文件字节保持不变，只在末尾追加
-新对象、xref 和 trailer。图片、多个 PDF 混排或带 `/Rotate` 的页面会回退到 qpdf 完整重建。
+PDF。文本层会先检测每个版面块里的实际文字行，再按行设置字号和位置，避免整段文字挤在
+块中央。单个 PDF 会通过 `pindf-append` 走真正的增量更新：原文件字节保持不变，只在末尾
+追加新对象、xref 和 trailer。图片、多个 PDF 混排或带 `/Rotate` 的页面会回退到 qpdf
+完整重建。
+
+如果已经导出过识别结果，可以重新打开源 PDF / 图片，用「文件 → 导入识别结果 JSON…」恢复
+识别文本和版面块，不需要再次调用 OCR。导入的 JSON 既可以是本程序 GUI/CLI 的新格式（含
+逐行文字框），也可以是旧格式或 GLM 的 `layout_blocks`；旧格式会在显示/导出时按页面图像
+补算行框。JSON 页数不必和源文档完全一致，但页码必须在源文档范围内，超出范围的条目会被忽略。
 
 「大纲」页支持两种来源：
 
@@ -196,7 +205,8 @@ src/
 │   ├── ocr.*              # OCR 客户端、multipart 组包、GLM 分区识别
 │   ├── layout.*           # PP-DocLayoutV3 ONNX 版面检测
 │   ├── ocrqueue.*         # 并发队列、取消、空结果重试
-│   ├── exporters.*        # Markdown / JSON 导出
+│   ├── exporters.*        # Markdown / JSON 导出与识别结果导入
+│   ├── textlayout.*       # 按页面图像检测文字行，供选择层/PDF 文本层使用
 │   ├── pdfexport.*        # 可搜索 PDF：文本层、增量写入与 qpdf fallback
 │   ├── ocrcost.*          # OCR 页费估算
 │   ├── unicodenormalize.* # PDF 文本层的 CJK 字符归一化

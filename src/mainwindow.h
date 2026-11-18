@@ -35,6 +35,8 @@ public:
     bool loadPath(const QString &path);
     // 导入 pdf-outline 兼容的 JSON/YAML，替换当前大纲。
     bool importOutlineFile(const QString &path);
+    // 导入本程序导出的识别结果 JSON，套用到当前已打开的源文档。
+    bool importResultsFile(const QString &path);
     // 打开一组路径（PDF / 图片 / 图片目录，可混合），替换当前文档。
     void openPaths(const QStringList &paths);
     void startOcrAll();
@@ -97,6 +99,7 @@ private:
     bool previewToc(const QVector<toc::Entry> &entries, int guessedOffset,
                     QVector<OutlineEntry> *mapped);
 
+    void importResults();
     void exportMarkdown();
     void exportJson();
     void exportSearchablePdf();

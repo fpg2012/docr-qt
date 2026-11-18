@@ -19,6 +19,7 @@ pkg_check_modules(QT6SVG REQUIRED IMPORTED_TARGET Qt6Svg)
 add_library(docr-core STATIC
     src/core/ocr.cpp
     src/core/layout.cpp
+    src/core/textlayout.cpp
     src/core/document.cpp
     src/core/ocrqueue.cpp
     src/core/exporters.cpp

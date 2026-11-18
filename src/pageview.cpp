@@ -20,6 +20,7 @@
 #include <limits>
 
 #include "core/document.h"
+#include "core/textlayout.h"
 #include "theme.h"
 
 namespace {
@@ -93,6 +94,14 @@ QRectF blockRect(const QRectF &page, const ocr::Block &block)
         const QRectF pixel = pageBox(page, box);
         rect = rect.isNull() ? pixel : rect.united(pixel);
     }
+    return rect;
+}
+
+QRectF normalizedBlockRect(const ocr::Block &block)
+{
+    QRectF rect;
+    for (const QRectF &box : block.boxes)
+        rect = rect.isNull() ? box : rect.united(box);
     return rect;
 }
 
@@ -241,6 +250,25 @@ void PageView::refreshPage(int page)
     update();
 }
 
+void PageView::reloadResults()
+{
+    if (!m_doc)
+        return;
+    clearTextSelection();
+    m_selection.clear();
+    for (int i = 0; i < m_pages.size() && i < m_doc->count(); ++i) {
+        PageLayout &layout = m_pages[i];
+        layout.blocks.clear();
+        const PageEntry &entry = m_doc->page(i);
+        if (entry.result.ok() && !entry.result.blocks.isEmpty())
+            layout.blocks = entry.result.blocks;
+    }
+    rebuildBlocks();
+    ensureVisiblePages();
+    emit selectionChanged({});
+    update();
+}
+
 void PageView::setBoxesVisible(bool visible)
 {
     m_boxesVisible = visible;
@@ -308,7 +336,11 @@ void PageView::rebuildBlocks()
             flat.page = p;
             flat.block = b;
             flat.box = blockRect(page.rect, block);
+            flat.normBox = normalizedBlockRect(block);
+            flat.kind = block.kind;
             flat.text = ocr::displayText(block.text);
+            flat.lines = block.lines;
+            flat.linesReady = !flat.lines.isEmpty() || flat.text.isEmpty();
             m_flat.append(flat);
         }
     }
@@ -332,7 +364,11 @@ void PageView::replacePageBlocks(int page)
         flat.page = page;
         flat.block = b;
         flat.box = blockRect(layout.rect, block);
+        flat.normBox = normalizedBlockRect(block);
+        flat.kind = block.kind;
         flat.text = ocr::displayText(block.text);
+        flat.lines = block.lines;
+        flat.linesReady = !flat.lines.isEmpty() || flat.text.isEmpty();
         fresh.append(flat);
     }
 
@@ -654,6 +690,20 @@ QRectF PageView::blockBox(int flat) const
     return m_flat.at(flat).box;
 }
 
+void PageView::ensureLines(int flat) const
+{
+    if (flat < 0 || flat >= m_flat.size())
+        return;
+    FlatBlock &block = m_flat[flat];
+    if (block.linesReady)
+        return;
+    block.linesReady = true;
+    if (block.text.isEmpty() || block.normBox.isEmpty())
+        return;
+    const QImage pageImage = m_doc ? m_doc->ensureImage(block.page) : QImage();
+    block.lines = textlayout::place(block.text, block.normBox, pageImage, block.kind);
+}
+
 int PageView::charIndexAt(int flat, const QPointF &scenePos) const
 {
     if (flat < 0 || flat >= m_flat.size())
@@ -664,6 +714,33 @@ int PageView::charIndexAt(int flat, const QPointF &scenePos) const
     const QRectF box = block.box;
     if (box.isEmpty() || box.width() <= 0)
         return -1;
+
+    ensureLines(flat);
+    if (!block.lines.isEmpty()) {
+        const QRectF pageRect = m_pages.at(block.page).rect;
+        int bestLine = -1;
+        qreal bestDistance = std::numeric_limits<qreal>::max();
+        for (int i = 0; i < block.lines.size(); ++i) {
+            const QRectF lineBox = pageBox(pageRect, block.lines.at(i).box);
+            if (lineBox.width() <= 0 || lineBox.height() <= 0)
+                continue;
+            const qreal distance = qAbs(scenePos.y() - lineBox.center().y());
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestLine = i;
+            }
+        }
+        if (bestLine >= 0) {
+            const ocr::TextLine &line = block.lines.at(bestLine);
+            const QRectF lineBox = pageBox(pageRect, line.box);
+            if (line.text.isEmpty())
+                return line.start;
+            const qreal fraction = qBound<qreal>(
+                0.0, (scenePos.x() - lineBox.left()) / qMax<qreal>(1.0, lineBox.width()), 1.0);
+            const int offset = qBound(0, qRound(fraction * line.text.size()), line.text.size());
+            return line.start + offset;
+        }
+    }
 
     QTextLayout layout(block.text, textFontFor(flat, box));
     layoutTextLines(layout, box.width());
@@ -1349,6 +1426,45 @@ void PageView::paintTextSelection(QPainter *painter, const QRectF &exposed) cons
         const QRectF box = block.box;
         if (box.isEmpty() || box.width() <= 0 || !box.intersects(exposed))
             continue;
+
+        ensureLines(blockIndex);
+        if (!block.lines.isEmpty()) {
+            const QRectF pageRect = m_pages.at(block.page).rect;
+            for (const ocr::TextLine &line : block.lines) {
+                if (line.text.isEmpty())
+                    continue;
+                const QRectF lineBox = pageBox(pageRect, line.box);
+                if (lineBox.width() <= 0 || lineBox.height() <= 0
+                    || !lineBox.intersects(exposed)) {
+                    continue;
+                }
+                const int lineStart = blockStart + line.start;
+                const int lineEnd = lineStart + line.text.size();
+                if (m_textHasSelection) {
+                    const int localBegin = qMax(m_textBegin, lineStart);
+                    const int localEnd = qMin(m_textEnd, lineEnd);
+                    if (localBegin >= localEnd)
+                        continue;
+                    const qreal span = qMax<qreal>(1.0, line.text.size());
+                    const qreal f1 = (localBegin - lineStart) / span;
+                    const qreal f2 = (localEnd - lineStart) / span;
+                    const QRectF r(lineBox.left() + lineBox.width() * f1, lineBox.top(),
+                                   qMax<qreal>(1.0, lineBox.width() * (f2 - f1)),
+                                   lineBox.height());
+                    painter->fillRect(r, fill);
+                } else if (!caretDrawn && m_textCaret >= lineStart
+                           && m_textCaret <= lineEnd) {
+                    const qreal span = qMax<qreal>(1.0, line.text.size());
+                    const qreal fx = (m_textCaret - lineStart) / span;
+                    const qreal x = lineBox.left() + lineBox.width() * fx;
+                    painter->setPen(caretPen);
+                    painter->drawLine(QPointF(x, lineBox.top()),
+                                      QPointF(x, lineBox.bottom()));
+                    caretDrawn = true;
+                }
+            }
+            continue;
+        }
 
         QTextLayout layout(block.text, textFontFor(blockIndex, box));
         layoutTextLines(layout, box.width());

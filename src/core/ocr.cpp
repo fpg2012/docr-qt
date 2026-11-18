@@ -1,6 +1,7 @@
 #include "ocr.h"
 
 #include "layout.h"
+#include "textlayout.h"
 
 #include <QBuffer>
 #include <QColor>
@@ -251,6 +252,162 @@ QVector<Block> parseBlocks(const QString &text)
         }
         if (!block.text.isEmpty() || !block.boxes.isEmpty())
             blocks.append(block);
+    }
+    return blocks;
+}
+
+
+namespace {
+
+QRectF rectFromJson(const QJsonValue &value)
+{
+    if (value.isArray()) {
+        const QJsonArray array = value.toArray();
+        if (array.size() >= 4) {
+            const qreal x1 = array.at(0).toDouble();
+            const qreal y1 = array.at(1).toDouble();
+            const qreal x2 = array.at(2).toDouble();
+            const qreal y2 = array.at(3).toDouble();
+            const qreal left = qMax<qreal>(0, qMin(x1, x2));
+            const qreal top = qMax<qreal>(0, qMin(y1, y2));
+            const qreal right = qMin<qreal>(1000, qMax(x1, x2));
+            const qreal bottom = qMin<qreal>(1000, qMax(y1, y2));
+            return QRectF(left, top, qMax<qreal>(0, right - left),
+                          qMax<qreal>(0, bottom - top));
+        }
+    } else if (value.isObject()) {
+        const QJsonObject object = value.toObject();
+        const qreal x = object.value(QStringLiteral("x")).toDouble();
+        const qreal y = object.value(QStringLiteral("y")).toDouble();
+        const qreal w = object.value(QStringLiteral("w")).toDouble(
+            object.value(QStringLiteral("width")).toDouble());
+        const qreal h = object.value(QStringLiteral("h")).toDouble(
+            object.value(QStringLiteral("height")).toDouble());
+        return QRectF(qMax<qreal>(0, x), qMax<qreal>(0, y),
+                      qMax<qreal>(0, w), qMax<qreal>(0, h));
+    }
+    return {};
+}
+
+QJsonArray rectToJson(const QRectF &box)
+{
+    return QJsonArray{box.left(), box.top(), box.right(), box.bottom()};
+}
+
+} // namespace
+
+QJsonObject blockToJson(const Block &block)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("kind"), block.kind);
+    object.insert(QStringLiteral("text"), block.text);
+
+    QJsonArray boxes;
+    for (const QRectF &box : block.boxes)
+        boxes.append(rectToJson(box));
+    object.insert(QStringLiteral("boxes"), boxes);
+
+    if (!block.lines.isEmpty()) {
+        QJsonArray lines;
+        for (const TextLine &line : block.lines) {
+            QJsonObject entry;
+            entry.insert(QStringLiteral("box"), rectToJson(line.box));
+            entry.insert(QStringLiteral("text"), line.text);
+            entry.insert(QStringLiteral("start"), line.start);
+            entry.insert(QStringLiteral("length"), line.length);
+            lines.append(entry);
+        }
+        object.insert(QStringLiteral("lines"), lines);
+    }
+    return object;
+}
+
+Block blockFromJson(const QJsonObject &object)
+{
+    Block block;
+    block.kind = object.value(QStringLiteral("kind")).toString(QStringLiteral("text"));
+    block.text = object.value(QStringLiteral("text")).toString();
+
+    const QJsonArray boxes = object.value(QStringLiteral("boxes")).toArray();
+    for (const QJsonValue &value : boxes) {
+        const QRectF box = rectFromJson(value);
+        if (box.width() > 0 && box.height() > 0)
+            block.boxes.append(box);
+    }
+    if (block.boxes.isEmpty()) {
+        const QRectF box = rectFromJson(object.value(QStringLiteral("bbox")));
+        if (box.width() > 0 && box.height() > 0)
+            block.boxes.append(box);
+    }
+
+    const QJsonArray lines = object.value(QStringLiteral("lines")).toArray();
+    for (const QJsonValue &value : lines) {
+        const QJsonObject entry = value.toObject();
+        TextLine line;
+        line.box = rectFromJson(entry.value(QStringLiteral("box")));
+        line.text = entry.value(QStringLiteral("text")).toString();
+        line.start = entry.value(QStringLiteral("start")).toInt(0);
+        line.length = entry.value(QStringLiteral("length")).toInt(line.text.size());
+        if (line.box.width() > 0 && line.box.height() > 0 && !line.text.isEmpty())
+            block.lines.append(line);
+    }
+    return block;
+}
+
+QVector<Block> blocksFromPayload(const QJsonObject &payload, QString *purpose)
+{
+    QVector<Block> blocks;
+    const QJsonArray blockArray = payload.value(QStringLiteral("blocks")).toArray();
+    for (const QJsonValue &value : blockArray) {
+        const Block block = blockFromJson(value.toObject());
+        if (!block.text.isEmpty() || !block.boxes.isEmpty())
+            blocks.append(block);
+    }
+
+    const QJsonArray layoutBlocks = payload.value(QStringLiteral("layout_blocks")).toArray();
+    if (blocks.isEmpty()) {
+        for (const QJsonValue &value : layoutBlocks) {
+            const Block block = blockFromJson(value.toObject());
+            if (!block.text.isEmpty() || !block.boxes.isEmpty())
+                blocks.append(block);
+        }
+    }
+
+    if (blocks.isEmpty()) {
+        const QJsonArray pages = payload.value(QStringLiteral("pages")).toArray();
+        for (const QJsonValue &value : pages)
+            blocks += parseBlocks(value.toObject().value(QStringLiteral("text")).toString());
+    }
+
+    // 纯文本/整页 fallback：没有坐标时给一个整页块，后续仍可用页面图像检测行。
+    if (blocks.isEmpty()) {
+        const QJsonArray pages = payload.value(QStringLiteral("pages")).toArray();
+        if (!pages.isEmpty()) {
+            const QString text = pages.first().toObject().value(QStringLiteral("text")).toString();
+            if (!text.trimmed().isEmpty()) {
+                Block block;
+                block.kind = QStringLiteral("text");
+                block.text = text;
+                block.boxes.append(QRectF(20, 20, 960, 960));
+                blocks.append(block);
+            }
+        }
+    }
+
+    if (purpose) {
+        const QString stored = payload.value(QStringLiteral("purpose")).toString();
+        if (!stored.isEmpty()) {
+            *purpose = stored;
+        } else if (payload.value(QStringLiteral("provider")).toString()
+                       == QLatin1String("glmocr")
+                   || payload.contains(QStringLiteral("layout"))
+                   || !layoutBlocks.isEmpty()) {
+            *purpose = QStringLiteral("glmocr");
+        } else if (!blocks.isEmpty()) {
+            *purpose = QStringLiteral("rich_layout_recognition");
+        } else {
+            *purpose = QStringLiteral("text_recognition");
+        }
     }
     return blocks;
 }
@@ -705,6 +862,17 @@ struct Client::GlmPipeline : QObject {
             result.error = job->firstError;
             emit q->finished(job->page, job->generation, result);
             return;
+        }
+
+        // 用页面图像检测真实文字行，给文本选择层和可搜索 PDF 用。
+        for (Block &block : result.blocks) {
+            if (block.text.isEmpty() || block.boxes.isEmpty() || isImageKind(block.kind))
+                continue;
+            const QString display = displayText(block.text);
+            if (display.trimmed().isEmpty())
+                continue;
+            block.lines = textlayout::place(display, block.boxes.first(), job->pageImage,
+                                            block.kind);
         }
 
         const QString pageText = lines.join(QLatin1Char('\n'));

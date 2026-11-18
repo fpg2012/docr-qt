@@ -35,6 +35,7 @@
 #include <qpdf/QPDFWriter.hh>
 
 #include "ocr.h"
+#include "textlayout.h"
 #include "unicodenormalize.h"
 
 namespace pdfexport {
@@ -209,22 +210,57 @@ QStringList wrapLine(const QString &line, const QFontMetricsF &metrics, qreal wi
     return result;
 }
 
-void drawTextLayer(const PageEntry &entry, const QSizeF &pageSize, QPainter &painter)
+QFont textLayerFont()
 {
-    const qreal width = qMax<qreal>(1.0, pageSize.width());
-    const qreal height = qMax<qreal>(1.0, pageSize.height());
-
     QFont font;
     font.setFamilies({QStringLiteral("Noto Sans CJK SC"), QStringLiteral("Source Han Sans CN"),
                       QStringLiteral("Microsoft YaHei"), QStringLiteral("PingFang SC"),
                       QStringLiteral("SimHei"), QStringLiteral("DejaVu Sans")});
     font.setStyleStrategy(QFont::PreferOutline);
+    return font;
+}
+
+void drawPlacedLine(QPainter &painter, const QRectF &target, const QString &text,
+                    const QFont &baseFont)
+{
+    QString drawable = text;
+    drawable.remove(QLatin1Char('\n'));
+    drawable.remove(QLatin1Char('\r'));
+    if (drawable.isEmpty() || target.width() <= 0 || target.height() <= 0)
+        return;
+
+    QFont font = baseFont;
+    const int pixelSize = qBound(3, qRound(target.height() * 0.82), 96);
+    font.setPixelSize(pixelSize);
+    QFontMetricsF metrics(font);
+    const qreal textWidth = metrics.horizontalAdvance(drawable);
+    if (textWidth <= 0.01)
+        return;
+    const qreal scaleX = target.width() / textWidth;
+    qreal baseline = target.top() + metrics.ascent();
+    if (baseline > target.bottom())
+        baseline = target.bottom();
+
+    painter.save();
+    painter.setFont(font);
+    painter.translate(target.left(), baseline);
+    painter.scale(scaleX, 1.0);
+    painter.drawText(QPointF(0, 0), drawable);
+    painter.restore();
+}
+
+void drawTextLayer(const PageEntry &entry, const QSizeF &pageSize, const QImage &pageImage,
+                   QPainter &painter)
+{
+    const qreal width = qMax<qreal>(1.0, pageSize.width());
+    const qreal height = qMax<qreal>(1.0, pageSize.height());
+    const QFont baseFont = textLayerFont();
 
     const QVector<ocr::Block> &blocks = entry.result.blocks;
     if (!blocks.isEmpty()) {
         for (const ocr::Block &block : blocks) {
-            const QString text = ocr::displayText(block.text).trimmed();
-            if (text.isEmpty() || block.boxes.isEmpty())
+            const QString text = ocr::displayText(block.text);
+            if (text.trimmed().isEmpty() || block.boxes.isEmpty())
                 continue;
 
             QRectF box;
@@ -233,34 +269,18 @@ void drawTextLayer(const PageEntry &entry, const QSizeF &pageSize, QPainter &pai
             if (box.width() <= 0 || box.height() <= 0)
                 continue;
 
-            const QRectF target(box.x() / 1000.0 * width, box.y() / 1000.0 * height,
-                                box.width() / 1000.0 * width,
-                                box.height() / 1000.0 * height);
-            QStringList rawLines = text.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
-            if (rawLines.isEmpty())
-                rawLines << text;
-
-            const qreal baseSize =
-                qBound<qreal>(4.0, target.height() * 0.78 / qMax(1, rawLines.size()), 48.0);
-            font.setPixelSize(qMax(1, qRound(baseSize)));
-            QFontMetricsF metrics(font);
-            painter.setFont(font);
-
-            QStringList lines;
-            for (const QString &raw : rawLines) {
-                const QString line = raw.simplified();
-                if (line.isEmpty())
-                    continue;
-                lines += wrapLine(line, metrics, qMax<qreal>(1.0, target.width()));
+            QVector<ocr::TextLine> lines = block.lines;
+            if (lines.isEmpty()) {
+                lines = textlayout::place(text, box, pageImage, block.kind);
+                if (lines.isEmpty() && pageImage.isNull())
+                    lines = textlayout::place(text, box, QImage(), block.kind);
             }
-            if (lines.isEmpty())
-                continue;
-
-            const qreal lineHeight = qMax<qreal>(1.0, metrics.height());
-            const qreal ascent = metrics.ascent();
-            for (int i = 0; i < lines.size(); ++i) {
-                const qreal baseline = target.top() + ascent + i * lineHeight;
-                painter.drawText(QPointF(target.left(), baseline), lines.at(i));
+            for (const ocr::TextLine &line : lines) {
+                const QRectF target(line.box.x() / 1000.0 * width,
+                                    line.box.y() / 1000.0 * height,
+                                    line.box.width() / 1000.0 * width,
+                                    line.box.height() / 1000.0 * height);
+                drawPlacedLine(painter, target, line.text, baseFont);
             }
         }
         return;
@@ -270,6 +290,7 @@ void drawTextLayer(const PageEntry &entry, const QSizeF &pageSize, QPainter &pai
     const QString text = ocr::plainText(entry.result.payload, entry.result.purpose).trimmed();
     if (text.isEmpty())
         return;
+    QFont font = baseFont;
     font.setPixelSize(10);
     QFontMetricsF metrics(font);
     painter.setFont(font);
@@ -288,8 +309,8 @@ void drawTextLayer(const PageEntry &entry, const QSizeF &pageSize, QPainter &pai
     }
 }
 
-bool writeOverlay(const PageEntry &entry, const QSizeF &pageSize, const QString &path,
-                  QString *error)
+bool writeOverlay(const PageEntry &entry, const QSizeF &pageSize, const QImage &pageImage,
+                  const QString &path, QString *error)
 {
     QPdfWriter writer(path);
     writer.setResolution(72);
@@ -304,7 +325,7 @@ bool writeOverlay(const PageEntry &entry, const QSizeF &pageSize, const QString 
     }
     painter.setRenderHint(QPainter::Antialiasing, false);
     painter.setPen(QColor(0, 0, 0, 0));
-    drawTextLayer(entry, pageSize, painter);
+    drawTextLayer(entry, pageSize, pageImage, painter);
     painter.end();
 
     if (!QFileInfo::exists(path) || QFileInfo(path).size() == 0) {
@@ -720,8 +741,10 @@ IncrementalResult tryWriteIncremental(Document &doc, const QVector<OutlineEntry>
         const PageEntry &entry = doc.page(i);
         if (pageHasText(entry)) {
             const QString overlayPath = work.filePath(QStringLiteral("overlay-%1.pdf").arg(i));
-            if (!writeOverlay(entry, entry.pdfSize, overlayPath, error))
+            const QImage pageImage = doc.ensureImage(i);
+            if (!writeOverlay(entry, entry.pdfSize, pageImage, overlayPath, error))
                 return IncrementalResult::Failed;
+            doc.releaseImage(i);
             if (!normalizeOverlayPdf(overlayPath, error))
                 return IncrementalResult::Failed;
             overlays.append({i, overlayPath});
@@ -844,10 +867,12 @@ bool writeSearchablePdf(Document &doc, const QVector<OutlineEntry> &outline,
                 if (pageHasText(entry)) {
                     const QString overlayPath = overlays.filePath(
                         QStringLiteral("overlay-%1.pdf").arg(i));
-                    if (!writeOverlay(entry, size, overlayPath, error))
+                    const QImage pageImage = doc.ensureImage(i);
+                    if (!writeOverlay(entry, size, pageImage, overlayPath, error))
                         break;
                     if (!addTextOverlay(out, page, overlayPath, error))
                         break;
+                    doc.releaseImage(i);
                 }
             } else {
                 QImage image = doc.ensureImage(i);
@@ -864,10 +889,11 @@ bool writeSearchablePdf(Document &doc, const QVector<OutlineEntry> &outline,
                 if (pageHasText(entry)) {
                     const QString overlayPath = overlays.filePath(
                         QStringLiteral("overlay-%1.pdf").arg(i));
-                    if (!writeOverlay(entry, size, overlayPath, error))
+                    if (!writeOverlay(entry, size, image, overlayPath, error))
                         break;
                     if (!addTextOverlay(out, page, overlayPath, error))
                         break;
+                    doc.releaseImage(i);
                 }
             }
 

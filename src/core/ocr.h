@@ -2,6 +2,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
@@ -15,10 +16,20 @@ namespace ocr {
 
 enum class Backend { DeepSeek, GlmOcr };
 
+// 版面块中的一行文字。box 为 0-1000 归一化坐标；start/length 是在
+// Block::text 的显示文本中的字符区间（用于文本选择）。
+struct TextLine {
+    QRectF box;
+    QString text;
+    int start = 0;
+    int length = 0;
+};
+
 // 一页中的一个版面块。boxes 为 0-1000 归一化坐标（页面左上角为原点）。
 struct Block {
     QString kind;
     QVector<QRectF> boxes;
+    QVector<TextLine> lines; // 可搜索文本层/选择层使用的逐行位置
     QString text;
 };
 
@@ -38,6 +49,12 @@ struct PageResult {
 
 // 解析 rich_layout_recognition 输出中的 <|ref|>/<|box|> 标记。
 QVector<Block> parseBlocks(const QString &text);
+
+// 版面块的 JSON 序列化/反序列化（导出 JSON 与导入 JSON 共用）。
+QJsonObject blockToJson(const Block &block);
+Block blockFromJson(const QJsonObject &object);
+QVector<Block> blocksFromPayload(const QJsonObject &payload,
+                                 QString *purpose = nullptr);
 
 // 拼接可读文本（表格转成 "a | b" 行）。
 QString plainText(const QJsonObject &payload, const QString &purpose);

@@ -140,7 +140,15 @@ QByteArray jsonFor(const Document &doc, const QVector<int> &pages)
         if (entry.result.ok()) {
             QJsonObject wrapper = entry.result.payload;
             wrapper.insert(QStringLiteral("page"), page + 1);
+            wrapper.insert(QStringLiteral("page_index"), page);
+            wrapper.insert(QStringLiteral("purpose"), entry.result.purpose);
             wrapper.insert(QStringLiteral("source"), entry.label);
+            if (!entry.result.blocks.isEmpty()) {
+                QJsonArray blocks;
+                for (const ocr::Block &block : entry.result.blocks)
+                    blocks.append(ocr::blockToJson(block));
+                wrapper.insert(QStringLiteral("blocks"), blocks);
+            }
             array.append(wrapper);
         } else {
             QJsonObject error;

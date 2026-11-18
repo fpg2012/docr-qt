@@ -381,7 +381,7 @@ uint mappedCodepoint(uint cp)
 
 QString normalizeForPdf(const QString &text)
 {
-    const QString normalized = text.normalized(QString::NormalizationForm_KC);
+    const QString normalized = text.normalized(QString::NormalizationForm_C);
     QString result;
     result.reserve(normalized.size());
 

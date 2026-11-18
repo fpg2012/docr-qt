@@ -5,7 +5,7 @@
 
 namespace unicodenormalize {
 
-// NFKC，并把 CJK 部首/笔画映射到等价的统一汉字。
+// NFC，并把 CJK 部首/笔画映射到等价的统一汉字；保留中文全角标点。
 QString normalizeForPdf(const QString &text);
 
 } // namespace unicodenormalize

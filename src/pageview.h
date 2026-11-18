@@ -29,6 +29,8 @@ public:
     void clearPage();
     // 某一页的 OCR 结果更新后刷新版面框与文本流。
     void refreshPage(int page);
+    // 批量导入识别结果后一次性重建全部页面的块与文本流。
+    void reloadResults();
 
     void setBoxesVisible(bool visible);
     void updateBackground();
@@ -104,9 +106,13 @@ private:
         int page = -1;
         int block = -1;
         QRectF box;                  // 场景坐标
+        QRectF normBox;              // 0-1000 归一化页面坐标
+        QString kind;
         QString text;
         int textStart = -1;          // 在 m_flowText 里的起点
-        mutable QFont font;          // 按框大小估算出的字号缓存
+        QVector<ocr::TextLine> lines;
+        bool linesReady = false;
+        mutable QFont font;          // 按框大小估算出的字号缓存（旧版无行框时兜底）
     };
 
     struct BoxRef {
@@ -147,6 +153,7 @@ private:
     QImage imageForFlat(int flat);
     bool copyImage(int flat);
     QRectF blockBox(int flat) const;
+    void ensureLines(int flat) const;
     int charIndexAt(int flat, const QPointF &scenePos) const;
     int textOffsetAt(const QPointF &scenePos) const;
     QFont textFontFor(int flat, const QRectF &box) const;
