@@ -84,6 +84,18 @@ target_link_libraries(docr-qt PRIVATE
 
 add_dependencies(docr-qt pindf-append-build)
 
+# Windows 下按 GUI 子系统链接，避免启动时额外弹出一个控制台窗口。
+# Qt 的入口点目标在不同安装里名字不同，按可用性挑一个。
+if(WIN32)
+    set_target_properties(docr-qt PROPERTIES WIN32_EXECUTABLE TRUE)
+    foreach(_ep Qt6::EntryPoint Qt6::EntryPointPrivate Qt6::EntryPointImplementation)
+        if(TARGET ${_ep})
+            target_link_libraries(docr-qt PRIVATE ${_ep})
+            break()
+        endif()
+    endforeach()
+endif()
+
 add_executable(docr-cli
     src/cli/main.cpp
 )
