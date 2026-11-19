@@ -151,7 +151,13 @@ QString promptForKind(const QString &kind)
 struct LayoutEngine::Impl {
     Impl(const QString &path)
         : env(ORT_LOGGING_LEVEL_WARNING, "docr-layout")
+#ifdef _WIN32
+        // Windows 下 ORTCHAR_T 是 wchar_t，只有 const wchar_t* 路径的重载。
+        // 临时 std::wstring 的生命周期覆盖整个构造函数调用，c_str() 安全。
+        , session(env, path.toStdWString().c_str(), sessionOptions())
+#else
         , session(env, path.toLocal8Bit().constData(), sessionOptions())
+#endif
     {
     }
 
